@@ -21,6 +21,7 @@ From 12,9M raw reads, we got 3,686,727 reads assigned family taxonomic level.
 # active the env
 source /.../anaconda3/etc/profile.d/conda.sh
 conda activate Barbell_new
+
 # run barbell
 /.../my_tools/barbell-main_2/target/release/barbell \
         -c configs_barbell/config.toml \
@@ -88,5 +89,7 @@ python3.9 /.../my_tools/KrakenTools/combine_kreports.py -r $output_dir/*_report.
 
 deactivate
 ```
+
+Now enjoy the downstream analysis :sparkles:
 
 
