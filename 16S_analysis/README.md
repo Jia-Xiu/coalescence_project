@@ -67,7 +67,7 @@ for file in $input_dir/*.fastq; do
   filename=$(basename "$file")
 
   # Run Kraken2 on the current FASTQ file
-  /home/groups/VEO/tools/kraken2/v2.1.2/kraken2 \
+  /.../VEO/tools/kraken2/v2.1.2/kraken2 \
           --db $kraken2_db \
           --threads 20 \
           --report $output_dir/${filename}_report.txt \
