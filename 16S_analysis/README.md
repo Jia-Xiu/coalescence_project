@@ -1,4 +1,6 @@
-# Pipeline: nanopore sequencing raw reads of full length 16S RNA gene
+# Pipeline to analyze raw reads of full length 16S RNA gene
+We got 14.29 M reads of full length 16S RNA gene in pod5 files, which were generated from the FLO-MIN114 flowcell using the SQK-LSK114 kit.
+
 ## Basecalling
 I used Dorado (v0.6.0) to do base calling.
 We got 17M reads after basecalling by Dorado, with 4M “redundant” simplex have duplex offsprings. I used non_redundant.fastq.gz (12M reads) file for further demultiplexing test. 
@@ -33,3 +35,58 @@ I will also use [prob-edit-rs](https://github.com/rickbeeloo/prob-edit-rs) for d
 
 ## Taxonomic assignment
 ### Kraken2
+We assigned taxonomy to the raw reads by using [Kraken2](https://github.com/DerrickWood/kraken2/wiki/Manual). To report the output, I used Braken, a [customized python script](https://combine_kreports.py)  by jennifer.lu717@gmail.com. See here: https://github.com/jenniferlu717/Bracken?tab=readme-ov-file and https://ccb.jhu.edu/software/bracken/
+```
+#!/bin/bash
+#SBATCH --job-name kraken2_barbell_raw_reads
+#SBATCH --partition=standard
+#SBATCH --output tmp/kraken2_barbell_raw_reads.%j.out
+#SBATCH --error  tmp/kraken2_barbell_raw_reads.%j.err
+#SBATCH --mem=20G
+#SBATCH --cpus-per-task=20
+#SBATCH --mail-type=FAIL,END
+#SBATCH --mail-user=...
+
+# https://github.com/DerrickWood/kraken2/wiki/Manual
+kraken2_db="/work/groups/VEO/databases/kraken2/v20180901"
+
+# Input directory containing the FASTQ files
+input_dir="results_barbell"
+
+# Output directory where filtered FASTQ files will be saved
+output_dir="results_kraken2_barbell_2"
+
+
+# Assign taxonomy
+
+mkdir -p "$output_dir"
+
+for file in $input_dir/*.fastq; do
+  # Extract the base name of the file (without path and extension)
+
+  filename=$(basename "$file")
+
+  # Run Kraken2 on the current FASTQ file
+  /home/groups/VEO/tools/kraken2/v2.1.2/kraken2 \
+          --db $kraken2_db \
+          --threads 20 \
+          --report $output_dir/${filename}_report.txt \
+          --output $output_dir/${filename}_output.txt $file
+
+  echo "Processed $file with Kraken2 and saved results to $kraken_output_dir"
+
+done
+
+
+echo "\nstart Kraken2 result summary by python code"
+
+# activate the python env
+
+source /.../my_tools/mypyenv/bin/activate
+
+python3.9 /.../my_tools/KrakenTools/combine_kreports.py -r $output_dir/*_report.txt -o kraken2_combined_abundance_report.txt
+
+deactivate
+```
+
+
