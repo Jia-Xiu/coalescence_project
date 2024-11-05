@@ -1,2 +1,2 @@
-# Coalescence project at UNI JENA
-Script used in my coalescence projects
+# Coalescence project 
+Script used in my coalescence project at UNI JENA
