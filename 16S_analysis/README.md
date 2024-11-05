@@ -2,8 +2,8 @@
 We got 14.29 M reads of full length 16S RNA gene in pod5 files, which were generated from the FLO-MIN114 flowcell :dna: using the SQK-LSK114 kit.
 
 ## Basecalling
-I used [Dorado (v0.6.0)](https://github.com/nanoporetech/dorado/tree/release-v0.6.0) to do base calling.
-We got 17M reads after basecalling by Dorado, with 4M “redundant” reads, which are so called "simplex have duplex offsprings". I used non_redundant.fastq.gz (12M reads) file for further demultiplexing test. 
+I used [Dorado (v0.6.0)](https://github.com/nanoporetech/dorado/tree/release-v0.6.0) to do basecalling.
+We got 17M reads after basecalling by Dorado, with 4M “redundant” reads, which are so called "simplex have duplex offsprings". I used non_redundant.fastq.gz (12.9M reads) file for further demultiplexing test. \
 Xiu: Maybe I should do quality and sequence length control before demultiplexing.
 ```
 /.../dorado/v0.6.0/bin/dorado duplex \
@@ -15,8 +15,8 @@ results_dorado_no_demultiplexing/duplex.bam | gzip -9 > results_dorado_no_demult
 ```
 ## Demultiplexing
 ### Barbell
-We used [Barbell](https://github.com/rickbeeloo/barbell) which is developed by Rick Beloo to demultiplex raw 16S reads
-From 12,9M raw reads, we got 3,686,727 reads assigned family taxonomic level.
+We used [Barbell](https://github.com/rickbeeloo/barbell) which is developed by Rick Beloo to demultiplex raw 16S reads. \
+From 12.9M raw reads, we got 3,686,727 reads assigned family taxonomic level.
 ```
 # active the env
 source /.../anaconda3/etc/profile.d/conda.sh
