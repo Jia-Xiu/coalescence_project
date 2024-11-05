@@ -1,5 +1,5 @@
 # Pipeline to analyze raw reads of full length 16S RNA gene
-We got 14.29 M reads of full length 16S RNA gene in pod5 files, which were generated from the FLO-MIN114 flowcell using the SQK-LSK114 kit.
+We got 14.29 M reads of full length 16S RNA gene in pod5 files, which were generated from the FLO-MIN114 flowcell :dna: using the SQK-LSK114 kit.
 
 ## Basecalling
 I used Dorado (v0.6.0) to do base calling.
