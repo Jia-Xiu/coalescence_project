@@ -1,8 +1,8 @@
 # Pipeline to analyze raw reads of full length 16S RNA gene
-We got 14.29 M reads of full length 16S RNA gene in pod5 files, which were generated from the FLO-MIN114 flowcell :dna: using the SQK-LSK114 kit.
+We got **14.29 M raw reads** of full length 16S RNA gene in pod5 files, which were generated from the FLO-MIN114 flowcell :dna: using the SQK-LSK114 kit.
 
 ## Basecalling
-I used [Dorado (v0.6.0)](https://github.com/nanoporetech/dorado/tree/release-v0.6.0) to do basecalling.
+I used [**Dorado (v0.6.0)**](https://github.com/nanoporetech/dorado/tree/release-v0.6.0) to do basecalling.
 We got 17M reads after basecalling by Dorado, with 4M “redundant” reads, which are so called "simplex have duplex offsprings". I used non_redundant.fastq.gz (12.9M reads) file for further demultiplexing test. \
 Xiu: Maybe I should do quality and sequence length control before demultiplexing.
 ```
@@ -15,8 +15,8 @@ results_dorado_no_demultiplexing/duplex.bam | gzip -9 > results_dorado_no_demult
 ```
 ## Demultiplexing
 ### Barbell
-We used [Barbell](https://github.com/rickbeeloo/barbell) which is developed by Rick Beloo to demultiplex raw 16S reads. \
-From 12.9M raw reads, we got 3,686,727 reads assigned family taxonomic level.
+We used [**Barbell**](https://github.com/rickbeeloo/barbell) which is developed by Rick Beloo to demultiplex raw 16S reads. \
+From 12.9M raw reads, we got **3,686,727 reads** assigned family taxonomic level.
 ```
 # active the env
 source /.../anaconda3/etc/profile.d/conda.sh
@@ -32,11 +32,11 @@ conda activate Barbell_new
 ```
 
 ### prob-edit-rs
-I will also use [prob-edit-rs](https://github.com/rickbeeloo/prob-edit-rs) for demultiplexing as it might be more precise than Barbell.
+I will also use [**prob-edit-rs**](https://github.com/rickbeeloo/prob-edit-rs) for demultiplexing as it might be more precise than Barbell.
 
 ## Taxonomic assignment
 ### Kraken2
-We assigned taxonomy to the raw reads by using [Kraken2](https://github.com/DerrickWood/kraken2/wiki/Manual). To report the output, I used Braken, a [customized python script](https://combine_kreports.py)  by jennifer.lu717@gmail.com. See here: https://github.com/jenniferlu717/Bracken?tab=readme-ov-file and https://ccb.jhu.edu/software/bracken/
+We assigned taxonomy to the raw reads by using [**Kraken2**](https://github.com/DerrickWood/kraken2/wiki/Manual). To report the output, I used Braken, a [customized python script](https://combine_kreports.py)  by jennifer.lu717@gmail.com. See here: https://github.com/jenniferlu717/Bracken?tab=readme-ov-file and https://ccb.jhu.edu/software/bracken/
 ```
 #!/bin/bash
 #SBATCH --job-name kraken2_barbell_raw_reads
@@ -91,5 +91,11 @@ deactivate
 ```
 
 Now enjoy the downstream analysis :sparkles:
+
+## Other analysis attempt
+I also tried **QIIME2** platform for sequence analysis.\
+By using VSEARCH from QIIME2, I found majority reads are unique because the higher error rates of the reads. From 3.6M reads, only 4263 reads can be rereplicated (sea the table from the table.qzv file).
+![image](https://github.com/user-attachments/assets/9fc970e2-d550-4b6e-813d-5ff65196ee14)
+denoising approaches are nDADA2 
 
 
