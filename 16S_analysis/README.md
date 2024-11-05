@@ -94,8 +94,8 @@ Now enjoy the downstream analysis :sparkles:
 
 ## Other analysis attempt
 I also tried **QIIME2** platform for sequence analysis.\
-By using VSEARCH from QIIME2, I found majority reads are unique because the higher error rates of the reads. From 3.6M reads, only 4263 reads can be rereplicated (sea the table from the table.qzv file).
-![image](https://github.com/user-attachments/assets/9fc970e2-d550-4b6e-813d-5ff65196ee14)
-denoising approaches are nDADA2 
+By using VSEARCH from QIIME2, I found majority reads are unique because the higher error rates of the reads. From 3.6M reads, only 4263 reads can be rereplicated (sea the table from the table.qzv file).\
+Current available denoising approaches, such as DADA2, are inappropriate for Nanopore long reads. Because current ONT data has too high an error rate for the DADA2 approach to be valid. DADA2 currently supports PacBio circular consensus sequencing but not nanopore reads (Callahan et al. 2019). Ref: https://github.com/benjjneb/dada2/issues/759 and https://github.com/benjjneb/dada2/issues/1364 
+
 
 
