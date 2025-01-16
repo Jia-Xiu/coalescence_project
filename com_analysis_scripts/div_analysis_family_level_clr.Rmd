@@ -1,0 +1,541 @@
+---
+title: "Coalescence experiment beta-diversity analysis (distances)"
+author: "Jia Xiu (xibeihenai@gmail.com)"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Coalescence experiment - Microbiome - 16S
+I used the Kraken2 results based on silva 16S dataset 138.1.
+Here, I only keep bacteria at family level & CLR transformed (Kraken2 Barbell).
+
+
+### Initiate libraries
+```{r load_packages_01, message=FALSE}
+
+rm(list=ls())
+
+# library(ape)
+library(tidyverse)
+library(vegan)
+library(ggvenn)
+# library(Rtsne)
+library(RColorBrewer)
+library(ggpubr) 
+library(phyloseq) # for prepare pyloseq object for network analysis
+# display.brewer.all()
+library(brms) # for Bayesian statistics 
+library(lme4) # Fitting Generalized Linear Mixed-Effects Models
+library(emmeans) # post hoc test
+library(DHARMa) # Residual Diagnostics 
+library(glmmTMB) # Fit a generalized linear mixed model (GLMM) using Template Model Builder (TMB).
+
+mytheme <- theme_light()+
+  theme(text = element_text(size = 10),
+        legend.box.background = element_rect(color = "#999999", linewidth = 0.2),
+        legend.title = element_text(face = "bold", size = 8),
+        legend.text = element_text(size = 8), 
+        legend.justification = c("right", "top"),
+        strip.background = element_blank(),
+        strip.text = element_text(colour = "black"),
+        panel.grid.minor = element_blank())  
+
+mytheme_facet <- theme_bw() +
+  theme(text = element_text(size = 8),
+        plot.title = element_text(face="bold", size = 8),
+        legend.position="right",
+        legend.background = element_rect(),
+        legend.title = element_text(face = "bold"),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 8),
+        axis.ticks = element_line(colour = "grey70", size = 0.2),
+        panel.grid.major = element_line(colour = "grey70", size = 0.2),
+        panel.grid.minor = element_blank())
+```
+
+### load the dataset
+```{r}
+
+# read phyloseq object with two original water samples
+ps <- readRDS("phyloseq_object_family_microcosm_two_fileds_clr.rds")
+ps
+
+
+# only keep the samples from microcosm experiment
+ps_microcosm <- subset_samples(ps, catagery == "microcosm")
+# remove taxa do not appear in any samples
+ps_microcosm <- filter_taxa(ps_microcosm, function(x) sum(x) != 0, TRUE)
+
+# check
+ps_microcosm
+tail(sample_data(ps_microcosm))
+otu_table(t(ps_microcosm))[1:3, 1:3]
+
+```
+
+### beta-diversity for only microcosm samples (no passage 0)
+we can read the table directly from the one we saved before.
+```{r}
+# euclidean distance, Aitchison distance, which is simply the Euclian distance between samples after clr transformation,
+com <- otu_table(t(ps_microcosm)) 
+
+# Perform PCA
+pca_result <- rda(com)
+
+sum_pca <- summary(pca_result)
+sum_pca$cont$importance[2, 1]
+sum_pca$cont$importance[2, 2]
+
+biplot(pca_result, scaling = 2)  # Scaling options: 1 (focus on variables), 2 (focus on sites)
+
+# Extract species scores (variable contributions) from PCA
+species_scores <- as.data.frame(scores(pca_result, display = "species"))
+
+# Set the threshold for a feature/family thet longer than certain values at PC1 or PC2
+threshold <- 1
+
+# Filter species based on PC1 or PC2 exceeding the threshold
+filtered_species <- species_scores[abs(species_scores$PC1) > threshold | abs(species_scores$PC2) > threshold, ]
+head(filtered_species)
+
+# Site scores (coordinates of samples in PCA space)
+df <- as.data.frame(scores(pca_result, display = "sites"))
+
+# Add metadata
+df <- df %>% 
+  rownames_to_column() %>%  
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_", remove = FALSE) %>%  
+  # select(-replicate) %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("freshwater", "seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("fresh:sea\n0:100", "fresh:sea\n25:75", "fresh:sea\n50:50", "fresh:sea\n75:25", "fresh:sea\n100:0"))) %>% 
+  mutate(passage = factor(as.numeric(str_remove(passage, "^p"))))
+  # mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"))) 
+
+head(df)
+
+
+# only color by water
+(p1 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = watertype, shape = watertype), size = 2.5, alpha = 0.3, stroke = 0.1) + 
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_manual(values = c("#0072B2", "#F8766D"), guide=guide_legend(override.aes = list(shape=21)), name = "Culture water") +
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme)
+
+# facet by mixing ratios
+(p2 <- ggplot(df, aes(PC1, PC2, shape = watertype, fill = mix)) +
+    geom_point(size = 2.5, alpha = 0.6, stroke = 0.1) + 
+    facet_grid(watertype ~ passage) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme_facet)
+
+# facet by passage
+(p3 <- ggplot(df, aes(PC1, PC2, shape = watertype, fill = passage)) +
+    geom_point(size = 2.5, alpha = 0.6, stroke = 0.1) + 
+    facet_grid(watertype ~ mix) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "YlGn", guide=guide_legend(override.aes = list(shape=21)), name = "Passages")+
+    scale_shape_manual(values = c(22, 21), guide = "none") +
+    mytheme_facet)
+
+(p23 <- ggarrange(p2, p3, labels = c("A", "B"), font.label = list(size = 10), widths = c(1, 0.7), nrow = 2, ncol = 1))
+
+# ggsave("PCA_all_combined_facet_clr_no_p0.jpg", width = 25, height = 14, units = "cm", p23)
+
+
+# PCA plot with family names when their length at PC1 or PC2 > threshold
+
+(p4 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = mix, shape = watertype), size = 3, alpha = 0.6, stroke = 0.1) + 
+    geom_text(aes(label = passage), size = 2, alpha = 0.4, color = "black") +
+    geom_segment(data = filtered_species, aes(x = 0, y = 0, xend = PC1, yend = PC2), arrow = arrow(length = unit(0.2, "cm")), linewidth = 0.1, color = "black", alpha = 0.6) +
+    geom_text(data = filtered_species, aes(x = PC1*0.95, y = PC2*0.95, label = rownames(filtered_species)), color = "black", alpha = 0.8, size = 3, vjust = -0.5) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme)
+
+# ggsave("PCA_water_family_kraken_barbell_clr_water_mix_no_p0_raw.pdf", width = 5.5, height = 4, p4)
+
+(p5 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = mix, shape = watertype), size = 3, alpha = 0.6, stroke = 0.1) + 
+    geom_text(aes(label = passage), size = 2, alpha = 0.4, color = "black") +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme)
+
+# ggsave("PCA_water_family_kraken_barbell_clr_water_mix_no_p0_no_arrows.jpg", width = 5.5, height = 4, p5)
+
+
+#### permanova
+# Permutational Multivariate Analysis of Variance Using Distance Matrices
+
+dist <- vegdist(com, method = "euclidean") 
+
+df <- as.data.frame(com[,1]) %>% 
+  rownames_to_column() %>%  
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_", remove = FALSE) %>%  
+  column_to_rownames(var = "rowname") %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("freshwater", "seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"))) %>% 
+  mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"))) 
+
+head(df)
+
+all(rownames(as.matrix(dist)) == rownames(df))
+
+# three-way permanova
+set.seed(123)
+result_whole <- adonis2(dist ~ mix*watertype*passage, data = df, permutation = 999)
+# result_whole <- adonis2(com ~ mix*watertype*passage, data = df, method = "euclidean", permutation = 999)
+result_whole
+
+# write.csv(result_whole, "permanova_water_mix_passage_family_Aitchison.csv")
+
+# data(iris)
+# ii <- iris[,c(1:4)]
+# i.obs <- ii
+# i.spp <- data.frame(species=iris[,5])
+# head(i.obs)
+# head(i.spp)
+# d.manova <- adonis2(i.obs ~ species, method = "euclidean", data= i.spp)
+# d.manova
+# Call:
+# adonis(formula = i.obs ~ species, data = i.spp, method = "euclidean") 
+
+# Permutation: free
+# Number of permutations: 999
+
+# Terms added sequentially (first to last)
+
+           # Df SumsOfSqs MeanSqs F.Model      R2 Pr(>F)    
+# species     2    592.07 296.037  487.33 0.86894  0.001 ***
+# Residuals 147     89.30   0.607         0.13106           
+# Total     149    681.37                 1.00000           
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+
+```
+
+### distance analysis
+```{r}
+
+# pairwise dissimilarity
+dist <- vegdist(com, method = "euclidean", binary = FALSE, diag = 1) 
+
+df <- as.matrix(dist)
+df <- data.frame(as.table(df))[lower.tri(df, diag = FALSE), ]
+cat("For no. of df pairs: Observed = Predict", (240*240-240)/2 == length(df$Freq), "\n")
+row.names(df) <- paste(df$Var1, df$Var2, sep = "_")
+
+# split treatment info
+df <- df %>% 
+  rownames_to_column(var = "name") %>% 
+  separate(name, c("fresh_a", "sea_a", "water_a", "passage_a", "replicate_a", "fresh_b", "sea_b", "water_b", "passage_b", "replicate_b"), "_", remove = FALSE) %>%
+  # select(-c(replicate_a, replicate_b)) %>% 
+  unite(a, c(fresh_a, sea_a), sep = "_", remove = TRUE) %>% 
+  unite(b, c(fresh_b, sea_b), sep = "_", remove = TRUE) %>% 
+  select(-c(Var1, Var2)) %>% 
+  column_to_rownames(var = "name")
+  
+df <- df[which(df$water_a == df$water_b),]
+# df <- df[which(df$a != df$b),]
+df <- df[which(df$passage_a == df$passage_b),]
+
+tail(df)
+
+# freshwater media
+df_f <- df %>% 
+  unite(mix, c(a, b), sep = "_", remove = TRUE) %>% 
+  filter(grepl("f100", mix)) %>% 
+  filter(water_a == "f") %>% 
+  mutate(mix = factor(mix, levels = c("f100_b0_f100_b0", "f75_b25_f100_b0", "f50_b50_f100_b0", "f25_b75_f100_b0", "f100_b0_f0_b100"), labels = c("100%-100%", "75%-100%", "50%-100%", "25%-100%", "0%-100%"))) %>% 
+  unite(replicate_pairs, c(replicate_a, replicate_b), sep = "_", remove = TRUE) 
+
+head(df_f)
+dim(df_f)
+
+# sea water media
+df_s <- df %>% 
+  unite(mix, c(a, b), sep = "_", remove = TRUE) %>% 
+  filter(grepl("b100", mix)) %>% 
+  filter(water_a == "b") %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100_f0_b100", "f25_b75_f0_b100", "f50_b50_f0_b100", "f75_b25_f0_b100", "f100_b0_f0_b100"), labels = c("100%-100%", "75%-100%", "50%-100%", "25%-100%", "0%-100%"))) %>% 
+  unite(replicate_pairs, c(replicate_a, replicate_b), sep = "_", remove = TRUE) 
+str(df_s)
+
+# box plot freshwater
+(p_f <- ggplot(df_f, aes(passage_a, Freq, fill = mix)) +
+    geom_boxplot(alpha = 1, position = position_dodge(0.8), outlier.size=-1, linewidth = 0.1) +
+  geom_point(size = 1, stroke = 0.1, position = position_jitterdodge(), shape = 21, color = "black") +
+    labs(x = "Passages", y = "Aitchison distance", title = "Dissimilarity to original freshwater communities in freshwater environment") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Freshwater community proportions\n(mixed vs. original)", direction = -1) +
+    mytheme_facet +
+    theme(panel.background = element_rect(fill = "aliceblue")))
+
+
+# box plot seawater
+(p_s <- ggplot(df_s, aes(passage_a, Freq, fill = mix)) +
+    geom_boxplot(alpha = 1, position = position_dodge(0.8), outlier.size=-1, linewidth = 0.1) +
+  geom_point(size = 1, stroke = 0.1, position = position_jitterdodge(), shape = 21, color = "black") +
+    labs(x = "Passages", y = "Aitchison distance", title = "Dissimilarity to original seawater communities in seawater environment") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Seawater community proportions\n(mixed vs. original)") + # , direction = -1
+    mytheme_facet +
+    theme(panel.background = element_rect(fill = "lavenderblush1"))) 
+
+(p <- ggarrange(p_f, p_s, labels = c("A", "B"), font.label = list(size = 10), nrow = 2, ncol = 1, align = "hv"))
+
+# ggsave("distance_with_original_communities_original_water_clr_bg.jpg", width = 12, height = 8, units = "cm", p, scale = 1.5)
+
+```
+
+### Statistic analysis for the distance among coalesced ratios (mix)
+#### fresh water
+Fixed Factors: Treatments and time points are your fixed factors.
+Number of samples: I have unbalanced number of pairwise distance (16 replicate_pairs in most mix but 6 in within group distance 100%-100%).
+Repeated Measures: If pairwise-samples correspond to the same across time points, this constitutes repeated measures, requiring a mixed model.
+
+```{r}
+
+# Check normality
+shapiro.test(df_f$Freq)
+#  If the p-value is below the previously determined alpha level (usually 5% = 0.05), the null hypothesis is rejected. We remember that the null hypothesis in the Shapiro-Wilk test is equivalent to a normal distribution.The p-value is very small at 3.728e-06. The null hypothesis of a normal distribution must therefore be rejected.
+par(mfrow=c(1,2))
+hist(df_f$Freq)
+qqnorm(df_f$Freq)
+qqline(df_f$Freq)
+# When looking at the histogram and Q-Q plot, it quickly becomes clear that this seems to be correct. The deviations from a normal distribution are too large.
+
+  
+# Fit GLMM with Gamma distribution (for non-normal continuous data)
+# Gaussian: Use with transformations if data can be normalized.
+# Gamma: Use for continuous positive data (e.g., indices > 0).
+# Poisson: For count-like data (though likely not your case).
+
+full_model <- glmer(Freq ~ mix * passage_a + (1 | replicate_pairs), family = Gamma(link = "log"), data = df_f)
+
+# Many of your interaction terms are not significant, which raises the question of whether to keep them. Here’s how you can decide: If most interactions are not significant (e.g., p-values > 0.05), you could consider removing them. Removing non-significant interactions simplifies the model, making it easier to interpret (Model Parsimony).
+# How to Decide: Use likelihood ratio tests (LRT) to compare the full model (with interactions) to a simpler model (without interactions). For glmer models, this can be done using the anova() function:
+# mix50%-100%:passage_ap5  0.146398   0.072864   2.009   0.0445 *  
+# mix25%-100%:passage_ap5 -0.039807   0.072864  -0.546   0.5848    
+# mix0%-100%:passage_ap5   0.177662   0.072864   2.438   0.0148 * 
+reduced_model <- glmer(Freq ~ mix + passage_a + (1 | replicate_pairs), family = Gamma(link = "log"), data = df_f)
+
+anova(reduced_model, full_model)
+
+# Model summary
+# divert all R console output between the first and second call of sink() to a file that you specify.
+# sink(file = "glmer_output_full_model_df_f.txt")
+summary(full_model)
+# sink(file = NULL)
+
+# sink(file = "glmer_output_reduced_model_df_f.txt")
+summary(reduced_model)
+# sink(file = NULL)
+
+
+# Residual Diagnostics 
+# Residuals are critical for assessing the model's fit and assumptions:
+
+# Normality of residuals: Ensures the random effects and errors behave as assumed by the GLMM.
+# Homoscedasticity: Constant variance of residuals ensures reliable standard errors and p-values.
+# Independence: Unaccounted patterns in residuals suggest model misspecification or missing predictors.
+# If residuals violate these assumptions, the model results may be biased or unreliable.
+simulation_output <- simulateResiduals(fittedModel = reduced_model)
+plot(simulation_output)
+
+# 1. QQ Plot shows: Compares the expected residual distribution to the observed residuals. Observation: Significant deviation from the expected normality (KS test: p=0). This indicates the residuals are not normally distributed, which can suggest a model misfit or that the Gamma family is inappropriate.
+# 2. Residuals vs. Predicted Values Plot shows: Checks for patterns or systematic deviations in residuals across the range of predicted values. Observation: The red quantile lines indicate significant deviations (Combined quantile test is significant). This suggests heteroscedasticity (non-constant variance) or potential misspecification in the model.
+# 3. Dispersion Test. Result: p=0, significant deviation. Indicates overdispersion, meaning the variance of the residuals is greater than expected under the model.
+
+
+# Switch to a quasi-likelihood approach 
+#Fit a generalized linear mixed model (GLMM) using Template Model Builder (TMB)
+overdisp_model<- glmmTMB(Freq ~ mix * passage_a + (1 | replicate_pairs), family = Gamma(link = "log"), dispformula = ~1, data = df_f)
+# dispformula: a one-sided formula for dispersion combining fixed and random effects: the default ~1 specifies the standard dispersion given any family
+summary(overdisp_model)
+# replicate_pairs: Variance = 0.0006023, Std. Dev. = 0.02454. Indicates minimal variability in Freq attributable to differences between replicate_pairs. This small variance suggests that the random effect plays a limited role in explaining the response.
+# Dispersion Estimate: σ^2 =0.00966. A measure of overdispersion. Low values indicate minimal overdispersion, confirming the Gamma family is appropriate for your data. (freshwater)
+# Intercept: β=2.801, p<2e−16. The baseline log-response when all predictors are at their reference levels (e.g., mix:100%-100% and the first level of passage: p1
+# Most levels are not significant compared to the reference (passage_a1), except: passage_ap5: 0.1298, p=0.00019 (significant increase).passage_ap6: 0.1422, p=4.27e−05 (significant increase).
+# Significant Factors:Main effects: All mix levels and two passage_a levels (passage_ap5 and passage_ap6). Interactions: Several mix * passage_a combinations.
+# Non-Significant Effects: Most mix * passage_a interactions are not significant, suggesting limited interactions between these factors.
+# Key Takeaways: The main driver of variability in Freq is the mix factor, with significant contributions from passage_ap5 and passage_ap6. Interactions are important for specific combinations but do not dominate the overall model.
+
+# Load required package
+library(performance)
+# Calculate R² for your model
+r2(overdisp_model)
+# Marginal R^2: Proportion of variance explained by the fixed effects.
+# Conditional R^2: Proportion of variance explained by both fixed and random effects.
+
+# Fit a null model (random effects only)
+null_model <- glmmTMB(Freq ~ (1 | replicate_pairs), 
+                      family = Gamma(link = "log"), 
+                      dispformula = ~1, 
+                      data = df_f)
+
+# Perform Likelihood Ratio Test
+anova(null_model, overdisp_model, test = "Chisq")
+
+
+############################
+# Refine the Model the model
+############################
+
+# removing random effect not necessary improve the model
+overdisp_model2<- glmmTMB(Freq ~ mix * passage_a, family = Gamma(link = "log"), dispformula = ~1, data = df_f)
+# removing non-significant interaction 
+overdisp_model3 <- glmmTMB(Freq ~ mix + passage_a + (1 | replicate_pairs),  family = Gamma(link = "log"), dispformula = ~1, data = df_f)
+# removing non-significant interaction and ovedispersion
+overdisp_model4 <- glmmTMB(Freq ~ mix + passage_a + (1 | replicate_pairs),  family = Gamma(link = "log"), data = df_f)
+
+anova(overdisp_model, overdisp_model2, overdisp_model3, overdisp_model4)
+# AIC and BIC: Lower values indicate a better-fitting model. overdisp_model3 and overdisp_model4 have the lowest AIC (1563.8) and BIC (1612.2). However, these models are simpler and may sacrifice predictive accuracy by excluding interactions. Log-likelihood: Higher values suggest a better fit. overdisp_model has the highest log-likelihood (-753.57), indicating the best fit among the models. Likelihood Ratio Test (LRT):
+# Evaluates whether a more complex model significantly improves fit over a simpler model. Comparing overdisp_model to overdisp_model2:χ 2=9.3569, p=0.0022 (significant). Suggests the random effect (1 | replicate_pairs) is important and improves model fit.
+
+sink(file = "glmmTMB_output_overdisp_model_df_f.txt")
+summary(overdisp_model)
+sink(file = NULL)
+
+############################
+# Model Validation
+############################
+
+# Check residual diagnostics (e.g., with DHARMa) 
+simulation_output <- simulateResiduals(fittedModel = overdisp_model)
+plot(simulation_output)
+
+# Post hoc pairwise comparisons
+emmeans(overdisp_model, pairwise ~ mix | passage_a, type = "response")
+
+### Bayesian statistics to verify the results from linear mixed model
+model_bayesian <- brm(Freq ~ mix * passage_a + (1 | replicate_pairs), 
+                      family = Gamma(link = "log"), data = df_f)
+model_bayesian
+
+
+```
+
+
+
+
+#### Seawater
+
+```{r}
+# check
+df_s[df_s$mix == "100%-100%" & df_s$passage_a == "p1", ]
+
+
+# Check normality
+shapiro.test(df_s$Freq)
+#  If the p-value is below the previously determined alpha level (usually 5% = 0.05), the null hypothesis is rejected. We remember that the null hypothesis in the Shapiro-Wilk test is equivalent to a normal distribution.The p-value is very small at 3.728e-06. The null hypothesis of a normal distribution must therefore be rejected.
+par(mfrow=c(1,2))
+hist(df_s$Freq)
+qqnorm(df_s$Freq)
+qqline(df_s$Freq)
+
+# Check homogeneity of variances
+# leveneTest(Freq ~ mix * passage_a , data = df_s)
+
+# Fit GLMM with Gamma distribution (for non-normal continuous data)
+# Gaussian: Use with transformations if data can be normalized.
+# Gamma: Use for continuous positive data (e.g., indices > 0).
+# Poisson: For count-like data (though likely not your case).
+
+full_model <- glmer(Freq ~ mix * passage_a + (1 | replicate_pairs), family = Gamma(link = "log"), data = df_s)
+
+# Model summary
+summary(full_model)
+
+# Many of your interaction terms are not significant, which raises the question of whether to keep them. Here’s how you can decide: If most interactions are not significant (e.g., p-values > 0.05), you could consider removing them. Removing non-significant interactions simplifies the model, making it easier to interpret (Model Parsimony).
+# How to Decide: Use likelihood ratio tests (LRT) to compare the full model (with interactions) to a simpler model (without interactions). For glmer models, this can be done using the anova() function:
+# mix50%-100%:passage_ap5  0.146398   0.072864   2.009   0.0445 *  
+# mix25%-100%:passage_ap5 -0.039807   0.072864  -0.546   0.5848    
+# mix0%-100%:passage_ap5   0.177662   0.072864   2.438   0.0148 * 
+reduced_model <- glmer(Freq ~ mix + passage_a + (1 | replicate_pairs), family = Gamma(link = "log"), data = df_s)
+anova(reduced_model, full_model)
+
+
+# Residual Diagnostics 
+# Residuals are critical for assessing the model's fit and assumptions:
+
+# Normality of residuals: Ensures the random effects and errors behave as assumed by the GLMM.
+# Homoscedasticity: Constant variance of residuals ensures reliable standard errors and p-values.
+# Independence: Unaccounted patterns in residuals suggest model misspecification or missing predictors.
+# If residuals violate these assumptions, the model results may be biased or unreliable.
+
+simulation_output <- simulateResiduals(fittedModel = full_model)
+plot(simulation_output)
+
+# 1. QQ Plot shows: Compares the expected residual distribution to the observed residuals. Observation: Significant deviation from the expected normality (KS test: p=0). This indicates the residuals are not normally distributed, which can suggest a model misfit or that the Gamma family is inappropriate.
+# 2. Residuals vs. Predicted Values Plot shows: Checks for patterns or systematic deviations in residuals across the range of predicted values. Observation: The red quantile lines indicate significant deviations (Combined quantile test is significant). This suggests heteroscedasticity (non-constant variance) or potential misspecification in the model.
+# 3. Dispersion Test. Result: p=0, significant deviation. Indicates overdispersion, meaning the variance of the residuals is greater than expected under the model.
+
+
+
+# Switch to a quasi-likelihood approach 
+# Fit a generalized linear mixed model (GLMM) using Template Model Builder (TMB).
+overdisp_model<- glmmTMB(Freq ~ mix * passage_a + (1 | replicate_pairs), family = Gamma(link = "log"), dispformula = ~1, data = df_s)
+# dispformula: a one-sided formula for dispersion combining fixed and random effects: the default ~1 specifies the standard dispersion given any family
+summary(overdisp_model)
+# replicate_pairs: Variance = 0.0006023, Std. Dev. = 0.02454. Indicates minimal variability in Freq attributable to differences between replicate_pairs. This small variance suggests that the random effect plays a limited role in explaining the response.
+# Dispersion Estimate: σ^2 =0.00966.A measure of overdispersion. Low values indicate minimal overdispersion, confirming the Gamma family is appropriate for your data. (freshwater)
+sink(file = "glmmTMB_output_overdisp_model_df_s.txt")
+summary(overdisp_model)
+sink(file = NULL)
+
+
+# Load required package
+library(performance)
+# Calculate R² for your model
+r2(overdisp_model)
+# Marginal R^2: Proportion of variance explained by the fixed effects.
+# Conditional R^2: Proportion of variance explained by both fixed and random effects.
+
+# Fit a null model (random effects only)
+null_model <- glmmTMB(Freq ~ (1 | replicate_pairs), 
+                      family = Gamma(link = "log"), 
+                      dispformula = ~1, 
+                      data = df_s)
+
+# Perform Likelihood Ratio Test
+anova(null_model, overdisp_model, test = "Chisq")
+
+
+simulation_output <- simulateResiduals(fittedModel = overdisp_model)
+plot(simulation_output)
+
+# Post hoc pairwise comparisons
+emmeans(overdisp_model, pairwise ~ mix | passage_a, type = "response")
+
+### Bayesian statistics to verify the results from linear mixed model
+model_bayesian <- brm(Freq ~ mix * passage_a + (1 | replicate_pairs), 
+                      family = Gamma(link = "log"), data = df_s)
+model_bayesian
+
+```
+
+
+### Session Info
+```{r}
+sessionInfo()
+```

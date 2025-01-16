@@ -1,0 +1,936 @@
+---
+title: "Coalescence experiment diversity analysis at family level & CLR transformed (Kraken2 Barbell)"
+author: "Jia Xiu (xibeihenai@gmail.com)"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Coalescence experiment - Microbiome - 16S
+I used the Kraken2 results based on silva 16S dataset 138.1.
+Here, I only keep bacteria
+
+
+### Initiate libraries
+```{r load_packages_01, message=FALSE}
+
+rm(list=ls())
+
+library(tidyverse)
+library(vegan)
+library(ggvenn)
+library(ape)
+library(Rtsne)
+library(RColorBrewer)
+library(ggpubr) 
+library(phyloseq) # for prepare pyloseq object for network analysis
+# display.brewer.all()
+
+mytheme <- theme_light()+
+  theme(text = element_text(size = 10),
+        legend.box.background = element_rect(color = "#999999", linewidth = 0.2),
+        legend.title = element_text(face = "bold", size = 8),
+        legend.text = element_text(size = 8), 
+        legend.justification = c("right", "top"),
+        strip.background = element_blank(),
+        strip.text = element_text(colour = "black"),
+        panel.grid.minor = element_blank())  
+
+mytheme_facet <- theme_bw() +
+  theme(text = element_text(size = 8),
+        plot.title = element_text(face="bold", size = 8),
+        legend.position="right",
+        legend.background = element_rect(),
+        legend.title = element_text(face = "bold"),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 8),
+        axis.ticks = element_line(colour = "grey70", size = 0.2),
+        panel.grid.major = element_line(colour = "grey70", size = 0.2),
+        panel.grid.minor = element_blank())
+```
+
+### Load raw feature table, taxonomy and metadata file
+Load feature table
+```{r}
+
+# load raw feature table (taxa * sample). I removed all the non bacteria taxa manual (thanks Aris)
+com <- read.csv("kraken2_combined_abundance_report_silva_16S_bacteria.csv", header = 1,  sep = ",") %>% 
+  rename(taxonomy_type=lvl_type)
+# check how the raw dataset looks like
+com[1:3, 1:8]
+
+com_tot <- com %>% 
+  select(!contains("lvl")) %>% 
+  rename_with(~str_remove(.x, "_all"))
+com_tot[1:3, 1:8]
+
+
+# kraken2 give different sample ID. so load this table to track the sample names
+sample_metadata_kraken2 <- read.csv("sample_metadata_kraken2.csv", header = 1,  sep = ",") %>% 
+  select(NO, sample)
+
+head(sample_metadata_kraken2)
+
+# load metadata file of all samples
+metadata <- read.csv("metadata_16S_17-08-2024.tsv", header = 1, sep = "\t")
+metadata <- metadata %>% 
+  select(-c(X27FBarcodeNumber, X1492RBarcodeNumber)) 
+
+tail(metadata)
+
+```
+
+
+### work on the total reads per sample at family level (raw, clr & rclr transformed and relative abundance)
+Remove singleton
+#### raw table
+First, change the taxonomic level. For instance, if you work at family level put as "F"
+```{r fig1, fig.height = 4, fig.width = 5}
+
+# combined number of reads (including reads within subtree)
+taxalevel <- "F"
+
+com_tot_family <- com_tot %>% 
+  filter(taxonomy_type == taxalevel) %>% 
+  select(!c(perc, taxonomy_type, taxid, tot))
+
+com_tot_family[1:3, 1:8]
+
+dim(com_tot_family)
+
+# clean the table by removing the empty space before the family names
+strips <- "^\\s+|\\s+$"
+com_tot_family$name <- gsub(strips,"", com_tot_family$name)
+
+com_tot_family <- com_tot_family %>% 
+  filter(!name %in% c("Unknown Family", "uncultured")) %>% 
+  column_to_rownames(var = "name")
+dim(com_tot_family)
+
+# check the total number of reads per family. 
+summary(rowSums(com_tot_family))
+
+# Clean the feature table by removing the low abundant species 
+# Define the threshold value to remove the low abundant family
+threshold <- 2
+
+# Remove rows where the sum of all columns is less than the threshold
+com_tot_family <- com_tot_family %>%
+  filter(rowSums(across(everything())) >= threshold)
+
+cat("there are", nrow(com_tot_family), "families")
+
+summary(colSums(com_tot_family))
+
+
+# Match and rename the column names of com_tot_family as sample name rather than kraken2 number
+colnames(com_tot_family) <- sample_metadata_kraken2$sample[match(colnames(com_tot_family), sample_metadata_kraken2$NO)]
+
+com_tot_family[1:3, 1:4]
+
+#check the total number of reads that has been assigned to family level
+number_of_reads <- data.frame(colsum_family = colSums(com_tot_family)) %>% 
+  rownames_to_column(var = "NO") 
+
+head(number_of_reads)
+# write.csv(number_of_reads, "total_number_of_reads_family.csv")
+
+```
+
+#### clr transformation
+CLR normalization transforms compositional data to address the "closed nature" of relative abundances, CLR(xi)=ln(xi/g(x)). \n
+- CLR produces values on a continuous scale that are suitable for Euclidean geometry, making it compatible with many statistical methods (e.g., PCA). 
+- CLR handles compositional bias effectively but can be sensitive to zeros since the logarithm is undefined for zero. 
+- The sum of each sample in CLR (Centered Log-Ratio) and rCLR (Robust Centered Log-Ratio) transformations will always be zero.
+```{r}
+
+# Option 1. CLR transformation
+# Robust CLR (rCLR): The rCLR transformation modifies the CLR approach by adding a small constant (often called a pseudocount) to the data before performing the log transformation, making it robust to zeros. This approach is especially useful in microbiome data where zeros are common in OTU tables.We performed a centered log-ratio (CLR) transformation of feature table, which has been added a small pseudocount, 10^-6. 
+# otu_table <- as.data.frame(t(com_tot_family)) # samples in rows, species in columns
+# 
+# # Add pseudocount to handle zeros
+# pseudocount <- 1e-6
+# otu_table <- otu_table + pseudocount
+# 
+# # CLR Transformation
+# clr_transform <- t(apply(otu_table, 1, function(x) log(x) - mean(log(x))))
+# clr_transform <- as.data.frame(t(clr_transform))
+# clr_transform[1:5, 1:3]
+# 
+# # check if the sum of each sample approximate zero
+# round(range(colSums(clr_transform)), 5)
+
+
+#############################################
+# Option 2.1 Using a library
+
+
+
+####################################
+# Option 2 CLR # based on https://www.youtube.com/watch?v=ulo7WatBEAo&ab_channel=RiffomonasProject
+# The CLR transformation does not replace zeros. Instead, only non-zero features are transformed, using the geometric mean of non-zero features as denominator.
+
+# geometric mean for only non-zero values
+gm <- function(x) {
+  exp(mean(log(x[x>0])))
+}
+
+
+# robust clr remove zeros
+clr_transform <- com_tot_family %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Family") %>%
+  pivot_longer(-Family, values_to = "n", names_to = "Sample") %>%
+  filter(n != 0) %>%
+  group_by(Sample) %>%
+  mutate(rclr = log(n/gm(n))) %>%
+  ungroup() %>%
+  select(-n) %>%
+  pivot_wider(names_from = "Sample", values_from = "rclr", values_fill = 0) %>% # if there are any NA values, we make them zeros
+  as.data.frame() %>%
+  column_to_rownames(var = "Family")
+
+clr_transform[1:3, 1:4]
+range(colSums(clr_transform))
+# these values should theoretically be zero. due to numerical precision issue in the caltulation in R, the sum often is not exactly zero, rather a very small number close to zero.
+
+# If a species has an abundance equal to the geometric mean of the community, this value will contribute as zero during log-ratio normalization. Adding a pseudocount prevents species with a true abundance of zero from being mathematically indistinguishable from those that contribute nothing to the geometric mean.
+
+# # using the script above I could get the same results as above
+# library(compositions)
+# 
+# # Assuming otu_table is your OTU matrix or data frame
+# otu_table <- data.frame(
+#   species1 = c(5, 0, 3),
+#   species2 = c(3, 5, 8),
+#   species3 = c(4, 6, 7)
+# )
+# otu_table 
+# # CLR transformation
+# clr_otu <- clr(otu_table)
+# print(clr_otu)
+
+
+
+```
+
+
+#### Relative abundance 
+```{r}
+
+# calculate relative abundance 
+com_tot_family_rel <- com_tot_family %>%
+  mutate(across(everything(), ~ .x / sum(.x)))
+
+# check if the sum of relative abundance per sample is 1 or not 
+range(colSums(com_tot_family_rel))
+
+# add meaningful row.names, check code up
+# com_tot_family_rel <- data.frame(t(com_tot_family_rel)) %>% 
+#   rownames_to_column(var = "NO") %>% 
+#   left_join(number_of_reads[, c("SampleName", "NO")], by = "NO") %>% 
+#   select(-NO) %>% 
+#   column_to_rownames(var = "SampleName")
+
+com_tot_family_rel[1:3, 1:4]
+dim(com_tot_family_rel)
+# hist(number_of_reads$forward.sequence.count - number_of_reads$colSums.com_tot_species....1..)
+cat("The total number of reads that have been assigned to family from all the samples is", sum(number_of_reads$colsum_family), "\nIt makes more sense to use the total number of reads. Though we saw the difference (histogram) between the total number of reads and the total number of reads assigned to species level")
+
+```
+
+### prepare a phyloseq object for network construction
+```{r}
+
+otu_table <- clr_transform
+otu_table[1:3, 1:3]
+dim(otu_table)
+
+sample_data <- metadata %>% 
+  select(-sample.id) %>% 
+  column_to_rownames(var = "SampleName")
+
+tail(sample_data)
+
+# read the full taxonomy table and clean it that only contains family found in my dataset
+
+# Filter rows in tax.db where taxonomy contains any family in the "OTU_table"
+# tax.db <- read.delim("Silva_taxmap_slv_ssu_ref_138.1.txt", header = T, stringsAsFactors = F) %>%
+#   select(-c(primaryAccession, start, stop)) %>%
+#   filter(str_detect(path, paste(row.names(otu_table), collapse = "|")))  %>%
+#   separate(path, c("Kindom", "Phylum", "Class", "Order", "Family", "Genus"), ";") %>%
+#   select(-c(Genus, organism_name)) %>%
+#   group_by(Kindom, Phylum, Class, Order, Family) %>%
+#   summarize(taxid = mean(taxid), .groups = "drop") %>%
+#   select(-taxid)
+# 
+# write.csv(tax.db, "taxonomy_from_my_family_list.csv", row.names = FALSE)
+
+tax.db <- read.csv("taxonomy_from_my_family_list.csv")
+head(tax.db)
+
+taxonomy <- otu_table %>% 
+  rownames_to_column(var = "Family") %>% 
+  select(Family) %>% 
+  left_join(tax.db, by ="Family") %>% 
+  select(-Kindom)
+
+# check how it looks by view and code below
+taxonomy[taxonomy$Family=="211ds20",]
+
+## manually add the higher orders in the taxonomic ranks by checking the raw kraken2 form
+
+# Logical vector indicating rows with any NA and display rows with NA
+rows_with_na <- apply(is.na(taxonomy), 1, any)
+taxonomy[rows_with_na, ]
+
+# Replace NAs in the row where Family == "Acidobacteriaceae (Subgroup 1)"
+taxonomy[taxonomy$Family == "[Eubacterium] coprostanoligenes group", c("Phylum", "Class", "Order")] <- c("Firmicutes", "Clostridia", "Oscillospirales")
+taxonomy[taxonomy$Family == "Acidobacteriaceae (Subgroup 1)", c("Phylum", "Class", "Order")] <- c("Acidobacteria", "Acidobacteriae", "Acidobacteriales")
+# taxonomy[taxonomy$Family == "211ds20", c("Phylum", "Class", "Order")] <- c("Proteobacteria", "Gammaproteobacteria", "Pseudomonadales")
+# taxonomy[taxonomy$Family == "37-13", c("Phylum", "Class", "Order")] <- c("Bacteroidota", "Bacteroidia", "Chitinophagales")
+# taxonomy[taxonomy$Family == "67-14", c("Phylum", "Class", "Order")] <- c("Actinobacteriota", "Thermoleophilia", "Solirubrobacterales")
+# taxonomy[taxonomy$Family == "01D2Z36", c("Phylum", "Class", "Order")] <- c("Bacteroidota", "Bacteroidia",  "Chthoniobacterales")
+# taxonomy[taxonomy$Family == "09D2Z48", c("Phylum", "Class", "Order")] <- c("Fibrobacterota", "Fibrobacteria", "Fibrobacterales")
+
+taxonomy <- taxonomy %>% 
+  column_to_rownames(var = "Family")
+
+tail(taxonomy)
+dim(taxonomy)
+# 
+# ## Make phyloseq object
+# otu_table_phyloseq <- otu_table(as.matrix(clr_transformed), taxa_are_rows = TRUE)
+# sample_data_phyloseq <- sample_data(sample_data)
+# taxonomy_phyloseq <- tax_table(as.matrix(taxonomy))
+# 
+# ps <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+# ps
+# 
+# # saveRDS(ps, file = "phyloseq_object_family_clr.rds")
+# 
+# ps_microcosm <- subset_samples(ps, sub_catagery == "microcosm")
+# ps_microcosm
+# 
+# # saveRDS(ps_microcosm, file = "phyloseq_object_family_microcosm_clr.rds")
+# 
+
+###################################################
+# save an raw reads phyloseq object ---------------
+otu_table <- com_tot_family
+otu_table[1:3, 1:3]
+dim(otu_table)
+
+## Make phyloseq object
+otu_table_phyloseq <- otu_table(as.matrix(otu_table), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(sample_data)
+taxonomy_phyloseq <- tax_table(as.matrix(taxonomy))
+
+ps <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps
+
+# saveRDS(ps, file = "phyloseq_object_family_raw_reads.rds")
+
+ps_microcosm <- subset_samples(ps, sub_catagery == "microcosm")
+ps_microcosm
+
+# saveRDS(ps_microcosm, file = "phyloseq_object_family_microcosm_raw_reads.rds")
+
+```
+
+### subset samples
+
+only keep microcosm samples
+```{r}
+# only keep samples from the microcosm experiment and field trial
+
+clr_transform[1:5, 1:3]
+# Define the list of characters to remove
+remove_chars <- c("control", "Mock", "FieldBlank", "f0_b0_", "IGAPark", "MittelmoleWarnemunde", "NeptunWerft", "SABMarinaBramow", "Stadthafen")
+
+# Subset the dataframe by removing columns with names that contain characters in the list
+com_tot_family_microcosm_clr <- clr_transform %>%
+  select(-contains(remove_chars)) #%>% 
+  # rename(f100_b0_f_p0_r1 = Muhlendamm ,
+  #        f0_b100_b_p0_r1 = WarnemundeStrand) 
+
+com_tot_family_microcosm_clr[1:3, 1:3]
+dim(com_tot_family_microcosm_clr)
+# write.csv(t(com_tot_family_microcosm_clr), paste0("com_tot_family_microcosm_clr_threshold_", threshold, ".csv", sep = ""))
+
+## Make phyloseq object
+otu_table_phyloseq <- otu_table(as.matrix(com_tot_family_microcosm_clr), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(sample_data)
+taxonomy_phyloseq <- tax_table(as.matrix(taxonomy))
+
+ps <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps
+
+# save this phyloseq object to make it easier to use
+# saveRDS(ps, file = "phyloseq_object_family_microcosm_two_fileds_clr.rds")
+
+
+```
+
+### You can start from here directly
+### beta-diversity for microcosm samples - sea & fresh water
+we can read the table directly from the one we saved before.
+```{r}
+
+# read phyloseq object
+ps <- readRDS("phyloseq_object_family_microcosm_two_fileds_clr.rds")
+
+# check
+ps
+summary(sample_data(ps))
+otu_table(t(ps))[1:3, 1:3]
+
+
+# euclidean distance, Aitchison distance, which is simply the Euclian distance between samples after clr transformation,
+
+# Perform PCA
+pca_result <- rda(t(com_tot_family_microcosm_clr))
+
+sum_pca <- summary(pca_result)
+sum_pca$cont$importance[2, 1]
+sum_pca$cont$importance[2, 2]
+
+biplot(pca_result, scaling = 2)  # Scaling options: 1 (focus on variables), 2 (focus on sites)
+
+# Extract species scores (variable contributions) from PCA
+species_scores <- as.data.frame(scores(pca_result, display = "species"))
+
+# Set the threshold for PC1 or PC2, e.g., 2
+threshold <- 0.5
+
+# Filter species based on PC1 or PC2 exceeding the threshold
+filtered_species <- species_scores[abs(species_scores$PC1) > threshold | abs(species_scores$PC2) > threshold, ]
+head(filtered_species)
+
+# Site scores (coordinates of samples in PCA space)
+df <- as.data.frame(scores(pca_result, display = "sites"))
+
+# Add metadata
+df <- df %>% 
+  rownames_to_column() %>%  
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_", remove = FALSE) %>%  
+  select(-replicate) %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("freshwater", "seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("fresh:sea\n0:100", "fresh:sea\n25:75", "fresh:sea\n50:50", "fresh:sea\n75:25", "fresh:sea\n100:0"))) %>% 
+  mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"))) 
+
+head(df)
+
+
+# only color by water
+(p1 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = watertype, shape = watertype), size = 2.5, alpha = 0.3, stroke = 0.1) + 
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_manual(values = c("#0072B2", "#F8766D"), guide=guide_legend(override.aes = list(shape=21)), name = "Culture water") +
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme)
+
+
+# facet by passage
+(p2 <- ggplot(df, aes(PC1, PC2, shape = watertype, fill = mix)) +
+    geom_point(size = 2.5, alpha = 0.6, stroke = 0.1) + 
+    facet_grid(watertype ~ passage) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Coalesce ratio")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme_facet)
+
+# facet by coalesced ratios
+(p3 <- ggplot(df, aes(PC1, PC2, shape = watertype, fill = passage)) +
+    geom_point(size = 2.5, alpha = 0.6, stroke = 0.1) + 
+    facet_grid(watertype ~ mix) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    # scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Coalesce ratio")+
+    scale_fill_brewer(palette = "YlGn", guide=guide_legend(override.aes = list(shape=21)), name = "Coalesce ratio")+
+    scale_shape_manual(values = c(22, 21), guide = "none") +
+    mytheme_facet)
+
+(p23 <- ggarrange(p2, p3, labels = c("A", "B"), font.label = list(size = 10), widths = c(1, 0.7), nrow = 2, ncol = 1))
+
+# ggsave("PCA_all_combined_facet_clr.jpg", width = 25, height = 14, units = "cm", p23)
+
+
+# PCA plot with species names when PC1 or PC2 > threshold
+(p1.1 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = watertype, shape = watertype), size = 2.5, alpha = 0.3, stroke = 0.1) + 
+    geom_segment(data = filtered_species, aes(x = 0, y = 0, xend = PC1, yend = PC2), arrow = arrow(length = unit(0.2, "cm")), linewidth = 0.1, color = "darkgray", alpha = 0.6) +
+    geom_text(data = filtered_species, aes(x = PC1*1.2, y = PC2*1.2, label = rownames(filtered_species)), color = "darkgray", alpha = 0.8, size = 2, vjust = -0.5) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_manual(values = c("#0072B2", "#F8766D"), guide=guide_legend(override.aes = list(shape=21)), name = "Culture water") +
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    # geom_text(data = filtered_species, aes(x = PC1, y = PC2, label = rownames(filtered_species)), color = "black", size = 3, vjust = -1) +
+    mytheme)
+
+# ggsave("PCA_water_family_kraken_barbell_clr_water.jpg", width = 10, height = 7.5, units = "cm", p1.2, scale = 1.1)
+
+(p1.2 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = mix, shape = watertype), size = 2.5, alpha = 0.3, stroke = 0.1) + 
+    geom_segment(data = filtered_species, aes(x = 0, y = 0, xend = PC1, yend = PC2), arrow = arrow(length = unit(0.2, "cm")), linewidth = 0.1, color = "darkgray", alpha = 0.6) +
+    geom_text(data = filtered_species, aes(x = PC1*1.2, y = PC2*1.2, label = rownames(filtered_species)), color = "darkgray", alpha = 0.8, size = 2, vjust = -0.5) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Coalesce ratio")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    # geom_text(data = filtered_species, aes(x = PC1, y = PC2, label = rownames(filtered_species)), color = "black", size = 3, vjust = -1) +
+    mytheme)
+
+# ggsave("PCA_water_family_kraken_barbell_clr_water_mix.jpg", width = 10, height = 7.5, units = "cm", p1.2, scale = 1.2)
+
+(p1.3 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = passage, shape = watertype), size = 2.5, alpha = 0.8, stroke = 0.1) + 
+    geom_segment(data = filtered_species, aes(x = 0, y = 0, xend = PC1, yend = PC2), arrow = arrow(length = unit(0.2, "cm")), linewidth = 0.1, color = "darkgray", alpha = 0.6) +
+    geom_text(data = filtered_species, aes(x = PC1*1.2, y = PC2*1.2, label = rownames(filtered_species)), color = "darkgray", alpha = 0.8, size = 2, vjust = -0.5) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "YlGn", guide=guide_legend(override.aes = list(shape=21)), name = "Coalesce ratio")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    # geom_text(data = filtered_species, aes(x = PC1, y = PC2, label = rownames(filtered_species)), color = "black", size = 3, vjust = -1) +
+    mytheme)
+
+# Purples YlGn
+# ggsave("PCA_water_family_kraken_barbell_clr_water_passage.jpg", width = 10, height = 7.5, units = "cm", p1.3, scale = 1.2)
+
+(p4 <- ggarrange(p1.1, p1.2, p1.3, nrow = 1, ncol = 3))
+
+(p <- ggarrange(p4, p2, labels = c("A", "B"), font.label = list(size = 10), heights = c(0.8, 1), nrow = 2, ncol = 1))
+
+# ggsave("PCA_all_combined_clr_all_raw.pdf", width = 28, height = 15, units = "cm", p)
+
+
+
+#######################
+### distance analysis
+#######################
+
+# pairwise dissimilarity
+dist <- vegdist(t(com_tot_family_microcosm_clr), method = "euclidean", binary = FALSE, diag = 1) 
+
+df <- as.matrix(dist)
+df <- data.frame(as.table(df))[lower.tri(df, diag = FALSE), ]
+cat("For no. of df pairs: Observed = Predict", (242*242-242)/2 == length(df$Freq), "\n")
+row.names(df) <- paste(df$Var1, df$Var2, sep = "_")
+
+# split treatment info
+df <- df %>% 
+  select(-c(Var1, Var2)) %>% 
+  rownames_to_column(var = "name") %>% 
+  separate(name, c("fresh_a", "sea_a", "water_a", "passage_a", "replicate_a", "fresh_b", "sea_b", "water_b", "passage_b", "replicate_b"), "_") %>% 
+  select(-c(replicate_a, replicate_b)) %>% 
+  unite(a, c(fresh_a, sea_a), sep = "_", remove = TRUE) %>% 
+  unite(b, c(fresh_b, sea_b), sep = "_", remove = TRUE)   
+  
+df <- df[which(df$water_a == df$water_b),]
+df <- df[which(df$a != df$b),]
+df <- df[which(df$passage_a == df$passage_b),]
+
+tail(df)
+
+# freshwater media
+df_f <- df %>% 
+  unite(mix, c(a, b), sep = "_", remove = TRUE) %>% 
+  filter(grepl("f100", mix)) %>% 
+  filter(water_a == "f") %>% 
+  mutate(mix = factor(mix, levels = c("f100_b0_f0_b100", "f25_b75_f100_b0", "f50_b50_f100_b0", "f75_b25_f100_b0"), labels = c("0% - 100%", "25% - 100%", "50% - 100%", "75% - 100%")))
+
+head(df_f)
+
+# sea water media
+df_s <- df %>% 
+  unite(mix, c(a, b), sep = "_", remove = TRUE) %>% 
+  filter(grepl("b100", mix)) %>% 
+  filter(water_a == "b") %>% 
+  mutate(mix = factor(mix, levels = c("f100_b0_f0_b100", "f75_b25_f0_b100", "f50_b50_f0_b100", "f25_b75_f0_b100"), labels = c("0% - 100%", "25% - 100%", "50% - 100%", "75% - 100%")))
+
+head(df_s)
+
+# box plot freshwater
+(p_f <- ggplot(df_f, aes(passage_a, Freq, fill = mix)) +
+    geom_boxplot(alpha = 0.4, position = position_dodge(0.8), outlier.size=-1, linewidth = 0.1) +
+  geom_point(size = 1, stroke = 0.1, position = position_jitterdodge(), shape = 21, color = "black") +
+    labs(x = "Passages", y = "Aitchison distance", title = "Distance to the 100% freshwater communities in seawater") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Ratios of freshwater communities\n(coalesced vs. original)") +
+    mytheme_facet)
+
+# box plot seawater
+(p_s <- ggplot(df_s, aes(passage_a, Freq, fill = mix)) +
+    geom_boxplot(alpha = 0.4, position = position_dodge(0.8), outlier.size=-1, linewidth = 0.1) +
+  geom_point(size = 1, stroke = 0.1, position = position_jitterdodge(), shape = 21, color = "black") +
+    labs(x = "Passages", y = "Aitchison distance", title = "Distance to the 100% seawater communities in seawater") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Ratios of seawater communities\n(coalesced vs. original)", direction = -1) +
+    mytheme_facet)
+
+(p <- ggarrange(p_f, p_s, labels = c("A", "B"), font.label = list(size = 10), nrow = 2, ncol = 1, align = "hv"))
+
+# ggsave("distance_with_original_communities_original_water_clr.jpg", width = 10, height = 8, units = "cm", p, scale = 1.5)
+
+
+
+### in a new environment
+
+# # freshwater media
+# df_f <- df %>% 
+#   unite(mix, c(a, b), sep = "_", remove = TRUE) %>% 
+#   filter(grepl("f100", mix)) %>% 
+#   filter(water_a == "b") %>% 
+#   mutate(mix = factor(mix, levels = c("f100_b0_f0_b100", "f25_b75_f100_b0", "f50_b50_f100_b0", "f75_b25_f100_b0"), labels = c("0% - 100%", "25% - 100%", "50% - 100%", "75% - 100%")))
+# 
+# tail(df_f)
+# 
+# # sea water media
+# df_s <- df %>% 
+#   unite(mix, c(a, b), sep = "_", remove = TRUE) %>% 
+#   filter(grepl("b100", mix) | grepl("b100", mix)) %>% 
+#   filter(water_a == "b") %>% 
+#   mutate(mix = factor(mix, levels = c("f100_b0_f0_b100", "f75_b25_f0_b100", "f50_b50_f0_b100", "f25_b75_f0_b100"), labels = c("0% - 100%", "25% - 100%", "50% - 100%", "75% - 100%")))
+# 
+# head(df_s)
+# 
+# # box plot freshwater
+# (p_f <- ggplot(df_f, aes(passage_a, Freq, fill = mix)) +
+#     geom_boxplot(alpha = 0.4, position = position_dodge(0.8), outlier.size=-1, linewidth = 0.1) +
+#   geom_point(size = 1, stroke = 0.1, position = position_jitterdodge(), shape = 21, color = "black") +
+#     labs(x = "Passages", y = "Aitchison distance", title = "Distance to the 100% freshwater communities in seawater") +
+#     scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Ratios of freshwater communities\n(coalesced vs. original)") +
+#     mytheme_facet)
+# 
+# # box plot seawater
+# (p_s <- ggplot(df_s, aes(passage_a, Freq, fill = mix)) +
+#     geom_boxplot(alpha = 0.4, position = position_dodge(0.8), outlier.size=-1, linewidth = 0.1) +
+#   geom_point(size = 1, stroke = 0.1, position = position_jitterdodge(), shape = 21, color = "black") +
+#     labs(x = "Passages", y = "Aitchison distance", title = "Distance to the 100% seawater communities in seawater") +
+#     scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Ratios of seawater communities\n(coalesced vs. original)", direction = -1) +
+#     mytheme_facet)
+# 
+# (p <- ggarrange(p_f, p_s, labels = c("A", "B"), font.label = list(size = 10), nrow = 2, ncol = 1, align = "hv"))
+
+# ggsave("distance_with_original_communities_nonnative_water_clr.jpg", width = 10, height = 8, units = "cm", p, scale = 1.5)
+
+```
+
+
+#### permanova
+```{r}
+# select only microcosm samples 
+com <- com_tot_family_microcosm_clr %>% 
+  select(-c(f100_b0_f_p0_r1, f0_b100_b_p0_r1))
+dim(com)
+
+# dist <- vegdist(t(com), method = "bray", binary = FALSE, diag = 1) 
+dist <- vegdist(t(com), method = "euclidean", binary = FALSE, diag = 1) 
+
+re <- pcoa(dist, correction = "none", rn = NULL)
+df <- as.data.frame(re$vectors[, 1:2]) %>% 
+  rownames_to_column() %>%  
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_") %>%  
+  select(-replicate) %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("freshwater", "seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("fresh:sea\n0:100", "fresh:sea\n25:75", "fresh:sea\n50:50", "fresh:sea\n75:25", "fresh:sea\n100:0"))) %>% 
+  mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"))) 
+
+head(df)
+
+# three-way permanova
+set.seed(123)
+result_whole <- adonis2(dist ~ mix*watertype*passage, data = df, permutation = 9999)
+# write.csv(result_whole, "permanova_water_mix_passage_family_kraken2_barbell.csv")
+
+```
+
+### plot stacked bar-plot of the relative abundance of each family
+```{r}
+
+# this is the cutoff (%) to show in the stacked bar plot
+ab_cutoff <- 5
+
+# prepare dataframe for family mean abundance plot
+df <- com_tot_family_microcosm_clr %>% 
+  rownames_to_column() %>%  
+  pivot_longer(-rowname) %>% 
+  pivot_wider(names_from = rowname, values_from = value) %>% 
+  separate(name, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_") %>%  # , remove = FALSE # if seperate not keep the name
+  select(-replicate) %>% 
+  pivot_longer(-c(fresh_bac, sea_bac, watertype, passage), names_to = "family", values_to = "percentage") %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("freshwater", "seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("fresh:sea\n0:100", "fresh:sea\n25:75", "fresh:sea\n50:50", "fresh:sea\n75:25", "fresh:sea\n100:0"))) %>% 
+  mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"))) %>% 
+  mutate(family = factor(family)) %>% 
+  mutate(percentage = percentage*100) %>% 
+  group_by(mix, watertype, passage, family) %>%
+  summarize(percentage = mean(percentage, na.rm=TRUE)) %>% 
+  filter(percentage > ab_cutoff) %>% 
+  # filter(family != "Others") %>% 
+  # filter(percentage > 0) %>% 
+  droplevels()
+
+cat("There are", length(table(df$family)), "families with abundance >", ab_cutoff, "%.")
+
+
+# color code
+n <- length(table(df$family))
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+set.seed(011235)
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+col <- sample(col_vector, n)
+# pie(rep(1,n), col=sample(col_vector, n))
+
+(p <- ggplot(df, aes(x = passage, y = percentage, fill = family, label = family)) +
+    facet_grid(mix ~ watertype) +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(values = col) +
+    geom_text(size = 2, position = position_stack(vjust = 0.5)) +
+    labs(x = "", y = "Relative abundance (%)", title = paste("Dominant family (relative abundance > ", ab_cutoff, "%)", sep = "")) +
+    # guides(fill = guide_legend(title = "family", reverse = FALSE)) +
+    mytheme +
+    theme(legend.position="none"))
+
+# ggsave("dominant_taxa_family_barbell_kraken2_clr.jpg", width = 15, height = 10, units = "cm", scale = 2,  p)
+
+```
+
+
+### alpha-diversity for microcosm samples -  sea & fresh water
+
+```{r}
+# get diversity indexes
+Shannon <- diversity(t(com_tot_family_microcosm_clr))
+Simpson <- diversity(t(com_tot_family_microcosm_clr), "simpson")
+Richness <- specnumber(t(com_tot_family_microcosm_clr))
+# Pielou's J = H'/ln(S) where H' is Shannon Weiner diversity and S is the total number of species in a sample,
+Pielous_evenness <- Shannon/log(Richness)
+
+df <- as.data.frame(cbind(Richness, Shannon)) %>% 
+  rownames_to_column() %>%  
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_") %>%  
+  select(-replicate) %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("freshwater", "seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("fresh:sea\n0:100", "fresh:sea\n25:75", "fresh:sea\n50:50", "fresh:sea\n75:25", "fresh:sea\n100:0"))) %>% 
+  mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"))) 
+
+head(df)
+
+(p <- ggplot(df, aes(passage, Richness, fill = mix)) +
+    geom_boxplot(alpha = 0.2, linewidth = 0.1) +
+    geom_dotplot(binaxis='y', size = 2, alpha = 0.9, stroke = 0.1, stackdir='center', position = position_dodge(0.8)) +
+    labs(x = "Passages", 
+         y = "Richness (number of families)", 
+         title = "") +
+    facet_grid(watertype ~ .) +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Coalesce ratio")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme_facet)
+
+# ggsave("richness_boxplot_family_barbell_kraken2_clr.jpg", width = 18, height = 8, units = "cm", p)
+
+df1 <- df %>% 
+  pivot_longer(-c(mix, watertype, passage), names_to = "div_index") %>% 
+  group_by(mix, watertype, passage, div_index) %>%
+  summarize(mean = mean(value, na.rm=TRUE), sd = round(sd(value), 3), n = round(length(value), 3)) 
+
+df1$se <- df1$sd / sqrt(df1$n)  # Calculate standard error of the mean
+  
+head(df1)
+  
+(p <- ggplot(df1, aes(passage, mean, group =mix)) +
+    geom_errorbar(aes(ymin = mean-se, ymax = mean+se, color = mix), 
+                  width = 0.2, position = position_dodge(width = 0.4), alpha = 0.6) +
+  geom_line(aes(color = mix), position = position_dodge(width = 0.4), alpha = 0.6) +
+  geom_point(aes(fill = mix), size = 2, stroke = 0.1, position = position_dodge(width = 0.4), shape = 21, color = "black") +
+    labs(x = "Passages", y = "", title = "") +
+    facet_grid(div_index ~ watertype, scales = "free_y") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Coalesce ratio")+
+    scale_color_brewer(palette = "RdYlBu", name = "Coalesce ratio")+
+    mytheme_facet)
+
+# ggsave("richness_shannon_lineplot_family_barbell_kraken2_clr.jpg", width = 18, height = 12, units = "cm", p)
+
+```
+
+### check the overlap of family composition in the source communities
+make venn plot
+```{r eval = FALSE}
+
+df <- com_tot_family_microcosm_clr %>% 
+  select_if(grepl("f100_b0_f_p0", names(.)) | grepl("f0_b100_b_p0", names(.)) | grepl("f100_b0_f_p1", names(.)) | grepl("f0_b100_b_p1", names(.)))
+
+# write.csv(df, "source_com_family.csv")
+source_com_family <-  list(
+ 
+  # Group 1: Columns 5 to 8: f100_b0_f_p1
+  f100_b0_f_p1 = rownames(df[rowSums(df[, 5:8]) > 0,]),
+  
+  # Group 2: Column 9
+  f100_b0_f_p0 = rownames(df[df[, 9] > 0, ]),
+  
+  # Group 3: Column 10
+  f0_b100_b_p0 = rownames(df[df[, 10] > 0, ]),
+  
+  # Group 4: Columns 1 to 4: f0_b100_b_p1
+  f0_b100_b_p1 = rownames(df[rowSums(df[, 1:4]) > 0, ])
+)
+
+str(source_com_family)
+
+# freshwater communities P0 vs. P1
+ls_f <- source_com_family[c("f100_b0_f_p0", "f100_b0_f_p1")]
+names(ls_f) <- c("P0", "P1")
+str(ls_f)
+
+p1 <- ggvenn(
+  ls_f, 
+  fill_color = c("#EFC000FF", "#0073C2FF"),
+  stroke_size = 0.5, set_name_size = 4)
+
+# seawater communities P0 vs. P1
+ls_s <- source_com_family[c("f0_b100_b_p0", "f0_b100_b_p1")]
+names(ls_s) <- c("P0", "P1")
+str(ls_s)
+
+p2 <- ggvenn(
+  ls_s, 
+  fill_color = c("#868686FF", "#CD534CFF"),
+  stroke_size = 0.5, set_name_size = 4)
+
+# freshwater vs. seawater communities at P0 
+ls_p0 <- source_com_family[c("f100_b0_f_p0", "f0_b100_b_p0")]
+names(ls_p0) <- c("Fresh Com.", "Sea Com.")
+str(ls_p0)
+
+p3 <- ggvenn(
+  ls_p0, 
+  fill_color = c("#EFC000FF", "#868686FF"),
+  stroke_size = 0.5, set_name_size = 4)
+
+# freshwater vs. seawater communities at P1 
+ls_p1 <- source_com_family[c("f100_b0_f_p1", "f0_b100_b_p1")]
+names(ls_p1) <- c("Fresh Com.", "Sea Com.")
+str(ls_p1)
+
+p4 <- ggvenn(
+  ls_p1, 
+  fill_color = c("#0073C2FF", "#CD534CFF"),
+  stroke_size = 0.5, set_name_size = 4)
+
+
+names(source_com_family) <- c("Fresh Com. (P1)", "Fresh Com. (P0)", "Sea Com. (P0)", "Sea Com. (P1)")
+
+(p0 <- ggvenn(
+    source_com_family, 
+  fill_color = c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF"),
+  stroke_size = 0.5, set_name_size = 4))
+
+(p <- ggarrange(p1, p2, p3, p4, p0, labels = c("A. Freshwater communities", "B. Seawater communities", "C. Passage 0", "D. Passage 1", "E"), nrow = 3, ncol = 2, heights = c(0.6, 0.6, 1.2), align = "hv"))
+
+# ggsave(paste("venn_plot_shared_family_raw_threshold_", threshold, "raw.pdf", sep=""), width = 24, height = 22, units = "cm", p)
+
+```
+
+
+### tSNE plot but I will not run it here, check the r code
+```{r eval = FALSE}
+
+### tSNE
+# ref:  https://distill.pub/2016/misread-tsne/
+
+com <- as.data.frame(t(com_tot_family_microcosm_clr))
+com[1:3, 1:3]
+dim(com)
+
+com_meta <- com %>% 
+  rownames_to_column() %>%  
+  select(rowname) %>% 
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_", remove = FALSE) %>%  
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("freshwater", "seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("fresh:sea\n0:100", "fresh:sea\n25:75", "fresh:sea\n50:50", "fresh:sea\n75:25", "fresh:sea\n100:0"))) %>% 
+  mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"))) %>% 
+  mutate(ID=row_number())
+
+head(com_meta)
+
+# Run t-SNE for different perplexity values
+perplexities <- c(5, 10, 15, 20, 25, 30, 35, 40, 45)
+tsne_results <- lapply(perplexities, function(perp) {
+  Rtsne(com, perplexity = perp, dims = 2, verbose = TRUE)
+})
+
+# Plot results for comparison
+par(mfrow = c(3, 3))
+for (i in seq_along(perplexities)) {
+  plot(tsne_results[[i]]$Y, col = com_meta$watertype, 
+       main = paste("Perplexity =", perplexities[i]),
+       xlab = "Dim1", ylab = "Dim2", pch = 19)
+}
+
+
+# find the best random seeds
+# a <- 110 # initial number
+# while(T){  
+#   set.seed(a) 
+#   print(a) 
+#   tsne_out <- Rtsne(com, perplexity = 25, dims = 2)
+#   plot(tsne_out$Y, col = com_meta$watertype, pch=19)      
+#   a <- a + 1  
+#   Sys.sleep(3) # sleep to evaluate the results
+# }
+
+# For highly structured datasets, larger perplexities emphasize global structure.
+# For datasets with fine-grained clusters, smaller perplexities emphasize local relationships.
+
+set.seed(111)
+tSNE_fit <- Rtsne(com, pca = FALSE, perplexity = 25, dims = 2, theta = 0.5) 
+
+tSNE_df <- tSNE_fit$Y %>% 
+  as.data.frame() %>%
+  rename(tSNE1="V1",
+         tSNE2="V2") %>%
+  mutate(ID=row_number()) %>%
+  inner_join(com_meta, by="ID")
+
+head(tSNE_df)
+
+(p <- ggplot(tSNE_df, aes(x = tSNE1, y = tSNE2, shape = watertype, fill = mix))+
+  geom_point(size = 2.5, alpha = 0.6, stroke = 0.1) + 
+    facet_grid(watertype ~ passage) +
+  scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Coalesce ratio")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme_facet)
+
+
+# ggsave("tSNE_water_mix_passage_family_kraken-barbell_perplexity_25_clr.jpg", width = 22, height = 7.5, units = "cm", p)
+
+```
+
+
+
+
+### check the share species between the source communities
+```{r}
+
+```
+
+
+### Session Info
+```{r}
+sessionInfo()
+```
