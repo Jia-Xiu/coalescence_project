@@ -26,25 +26,28 @@ NanoPlot -t 2 --fastq results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq -o res
 
 ## Demultiplexing
 ### Barbell
-We used [**Barbell**](https://github.com/rickbeeloo/barbell) which is developed by Rick Beloo to demultiplex raw 16S reads. \
-From 12.9M raw reads, we got **3,686,727 reads** assigned family taxonomic level.
+We used [**barbell-sg-v0.1.5**](https://github.com/rickbeeloo/barbell) which is developed by **Rick Beloo** to demultiplex raw 16S reads. \
+From 14.56 M raw reads, we got **6,267,380 reads** assigned family taxonomic level.
 ```
 #!/bin/bash
-#SBATCH --job-name demultiplex_barbell-sg-v0.1.5_without_adapters
+#SBATCH --job-name demultiplex_barbell-sg-v0.1.5_with_adapters
 #SBATCH --partition=short
-#SBATCH --mem=8G
+#SBATCH --mem=4G
 #SBATCH --cpus-per-task=8
-#SBATCH --output tmp/demultiplex_barbell-sg-v0.1.5_without_adapters.%j.out
-#SBATCH --error  tmp/demultiplex_barbell-sg-v0.1.5_without_adapters.%j.err
+#SBATCH --output tmp/demultiplex_barbell-sg-v0.1.5_with_adapters.%j.out
+#SBATCH --error  tmp/demultiplex_barbell-sg-v0.1.5_with_adapters.%j.err
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=***
 
+
 # Run barbell-sg using the following path
+
 barbell="/.../my_tools/barbell-sg-v0.1.5/target/release/barbell"
 
+
 # Define paths of main output folder and input files
-out_dir="results_barbell_sg/results_without_adapters"
-raw_fastq="results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq"
+out_dir="results_barbell_sg/results_with_adapters"
+raw_fastq="results_dorado_0.9_with_adpters/calls_2025-03-28_T19-44-13.fastq"
 fwd_primers="results_barbell_sg/forward_primer_barcodes.fasta"
 rev_primers="results_barbell_sg/reverse_primer_barcodes.fasta"
 
@@ -55,44 +58,44 @@ mkdir -p "$out_dir"
 $barbell annotate \
     -i "$raw_fastq" \
     -q "$fwd_primers","$rev_primers" \
-    -o $out_dir/annotations_without_adapters.txt \
+    -o $out_dir/annotations_with_adapters.txt \
     -t 8 \
     --tune
 
 # Inspect
-$barbell inspect -i $out_dir/annotations_without_adapters.txt
+$barbell inspect -i $out_dir/annotations_with_adapters.txt
 
 # Option 1: consider reads with only 2 barcode annotations
 
 # Filter
 $barbell filter \
-    -i $out_dir/annotations_without_adapters.txt \
-    -o $out_dir/filtered_without_adapters_2barcodes.txt \
+    -i $out_dir/annotations_with_adapters.txt \
+    -o $out_dir/filtered_with_adapters_2barcodes.txt \
     -f results_barbell_sg/rapid_filters_250_1300_1500.txt
 
 # Trim
 $barbell trimm \
-    -i $out_dir/filtered_without_adapters_2barcodes.txt \
+    -i $out_dir/filtered_with_adapters_2barcodes.txt \
     -r "$raw_fastq" \
-    -o $out_dir/trimmed_without_adapters_2barcodes
+    -o $out_dir/trimmed_with_adapters_2barcodes
 
 # Option 2: consider concatenated reads
 
 # Filter
 $barbell filter \
-    -i $out_dir/annotations_without_adapters.txt \
-    -o $out_dir/filtered_without_adapters_conctas.txt \
+    -i $out_dir/annotations_with_adapters.txt \
+    -o $out_dir/filtered_with_adapters_conctas.txt \
     -f results_barbell_sg/rapid_filters_250_1300_1500_2_3_concats.txt
 
 # Trim
 $barbell trimm \
-    -i $out_dir/filtered_without_adapters_conctas.txt \
+    -i $out_dir/filtered_with_adapters_conctas.txt \
     -r "$raw_fastq" \
-    -o $out_dir/trimmed_without_adapters_concta
+    -o $out_dir/trimmed_with_adapters_conctas
 ```
 
-### prob-edit-rs
-I will also use [**prob-edit-rs**](https://github.com/rickbeeloo/prob-edit-rs) for demultiplexing as it might be more precise than Barbell.
+### Rename demultiplexed fastq files
+
 
 ## Taxonomic assignment
 ### Kraken2
