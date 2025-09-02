@@ -1,5 +1,5 @@
 # Coalescence project 
-Script used in the coalescence project at UNI JENA.\ 
+Script used in the coalescence project at UNI JENA.
 > When the river meets the sea: bacterial community dynamics after coalescence.
 > Xiu Jia, Torsten Schubert, Rick Beeloo, Aristeidis Litos, Swapnil Doijad, Pim van Helvoort, Theodor Sperlea, Matthias Labrenz, and Bas E. Dutilh
 
