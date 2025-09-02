@@ -1,0 +1,704 @@
+---
+title: "Diversity analysis at family level"
+author: "Jia Xiu (xibeihenai@gmail.com)"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+#### Coalescence experiment - Microbiome - 16S 
+> I used the Kraken2 results with MPA-style based on silva 16S dataset 138.1. Here, I only keep bacteria at family level & CLR transformed (Kraken2 Barbell).
+
+
+### Initiate libraries and setup working env
+```{r load_packages_01, message=FALSE}
+
+rm(list=ls())
+
+# library(ape)
+library(tidyverse)
+library(vegan)
+library(ggpubr) 
+library(phyloseq) 
+library(circlize)
+library(ggpmisc)  # For regression equation annotation
+library(broom)  # For extracting p-values
+library(RColorBrewer)
+
+
+mytheme <- theme_light()+
+  theme(text = element_text(size = 10),
+        legend.title = element_text(face = "bold", size = 10),
+        legend.text = element_text(size = 10), 
+        legend.justification = c("right", "top"),
+        legend.background = element_rect(),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 10, color = "black"),
+        axis.ticks = element_line(colour = "grey70", linewidth = 0.2),
+        panel.grid.major = element_line(colour = "grey70", linewidth = 0.1),
+        panel.grid.minor = element_blank())  
+
+# Path to the folder containing Kraken2 report files
+folder_path <- "div_analysis_family_level/"
+
+# Create the directory if it does not already exist
+if (!dir.exists(folder_path)) {
+  dir.create(folder_path)
+}
+
+```
+
+
+## 1. alpha-diversity for microcosm samples -  sea & fresh water
+
+Use relative abundance table for the analysis.
+
+```{r}
+
+# read phyloseq object from all the samples - raw reads
+ps_rawreads <- readRDS("phyloseq_object_family_rawreads.rds")
+
+otu_table_all <- as.data.frame(otu_table(ps_rawreads)) 
+
+otu_table <- otu_table_all %>% 
+  select(!grep("Mock", names(otu_table_all)) & !grep("control", names(otu_table_all)) & !grep("FieldBlank", names(otu_table_all)) & !grep("f0_b0", names(otu_table_all))) %>% 
+  select(!c(IGAPark, MittelmoleWarnemunde, NeptunWerft, SABMarinaBramow, Stadthafen)) %>% 
+  rename(f100_b0_f_p0_r1 = Muhlendamm ,
+         f0_b100_b_p0_r1 = WarnemundeStrand) 
+
+otu_table[1:2, 1:2]
+
+# number of families x number of samples
+dim(otu_table)
+# summary of 240 samples (240 microcosm samples and two field samples)
+summary(colSums(otu_table))
+# total number of reads from 240 samples
+sum(colSums(otu_table))
+
+otu_table_rel <- otu_table %>% 
+  mutate(across(everything(), ~ .x / sum(.x))) 
+otu_table_rel <- t(otu_table_rel)
+
+otu_table_rel[120:121, c(16, 22)]
+dim(otu_table_rel)
+
+# get diversity indexes
+Shannon <- diversity(otu_table_rel, "shannon")
+head(Shannon)
+# Simpson <- diversity(t(otu_table_rel), "simpson")
+# dim(Simpson)
+Richness <- specnumber(otu_table_rel)
+head(Richness)
+# Pielou's J = H'/ln(S) where H' is Shannon Weiner diversity and S is the total number of species in a sample,
+Pielous_evenness <- Shannon/log(Richness)
+
+df <- as.data.frame(cbind(Richness, Shannon)) %>% 
+  rownames_to_column() %>%  
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_") %>%  
+  select(-replicate) %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("Freshwater", "Seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("0:100", "25:75", "50:50", "75:25", "100:0"))) %>% 
+  mutate(passage = factor(as.numeric(str_remove(passage, "^p"))))
+
+head(df)
+
+# write.csv(df, paste0(folder_path, "richness_shannon_all_samples.csv"))
+
+df1 <- df %>% 
+  pivot_longer(-c(mix, watertype, passage), names_to = "div_index") %>% 
+  group_by(mix, watertype, passage, div_index) %>%
+  summarize(mean = mean(value, na.rm=TRUE), sd = round(sd(value), 3), n = round(length(value), 3)) 
+
+df1$se <- df1$sd / sqrt(df1$n)  # Calculate standard error of the mean
+
+head(df1)
+
+(p <- ggplot(df1, aes(passage, mean, group =mix)) +
+    geom_errorbar(aes(ymin = mean-se, ymax = mean+se, color = mix), 
+                  width = 0.2, position = position_dodge(width = 0.4), alpha = 0.6) +
+    geom_line(aes(color = mix), position = position_dodge(width = 0.4), alpha = 0.6) +
+    geom_point(aes(fill = mix), size = 2, stroke = 0.1, position = position_dodge(width = 0.4), shape = 21, color = "black") +
+    labs(x = "Passages", y = "", title = "") +
+    facet_grid(div_index ~ watertype, scales = "free_y") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio \n(fresh:sea)")+
+    scale_color_brewer(palette = "RdYlBu", name = "Mixing ratio \n(fresh:sea)")+
+    mytheme)
+
+# ggsave(paste0(folder_path, "richness_shannon_lineplot_family.png"), width = 5.5, height = 3.5, p)
+
+```
+
+
+### 2. beta-diversity for only microcosm samples (no passage 0 / field samples)
+Here we did PCA analysis based on clr transformed table.
+> "Aitchison distance has numerous other desirable properties, such as scale invariance, negating the need to perform rarefaction. This feature is critical when one lacks access to absolute microbial abundance, because scale variant distances ensure equivalence between distances computed from absolute and relative abundance measurements."
+
+```{r}
+
+# read phyloseq object from all the samples - CLR transformed
+ps_clr <- readRDS("phyloseq_object_family_clr.rds")
+ps_clr
+
+# only keep the samples from microcosm experiment
+ps_microcosm <- subset_samples(ps_clr, catagery == "microcosm")
+# remove taxa do not appear in any samples
+ps_microcosm <- filter_taxa(ps_microcosm, function(x) sum(x) != 0, TRUE)
+
+# check
+ps_microcosm
+tail(sample_data(ps_microcosm))
+
+# prepare feature table for further analysis
+com <- as.data.frame(otu_table(t(ps_microcosm)))
+
+# make col.names shorter
+colnames(com) <- sub(".*(f__)", "\\", colnames(com))
+com[1:3, 1:3]
+
+
+###########################
+# PCA
+###########################
+
+# Aitchison distance is simply the Euclidean distance between samples after clr transformation,
+pca_result <- rda(com)
+
+sum_pca <- summary(pca_result)
+sum_pca$cont$importance[2, 1]
+sum_pca$cont$importance[2, 2]
+
+biplot(pca_result, scaling = 2)  # Scaling options: 1 (focus on variables), 2 (focus on sites)
+
+# Extract species scores (variable contributions) from PCA
+species_scores <- as.data.frame(scores(pca_result, display = "species"))
+
+# Set the threshold for a feature/family thet longer than certain values at PC1 or PC2
+threshold <- 1
+
+# Filter species based on PC1 or PC2 exceeding the threshold
+filtered_species <- species_scores[abs(species_scores$PC1) > threshold | abs(species_scores$PC2) > threshold, ]
+head(filtered_species)
+row.names(filtered_species)
+
+# Site scores (coordinates of samples in PCA space)
+df <- as.data.frame(scores(pca_result, display = "sites"))
+
+# Add metadata
+df <- df %>% 
+  rownames_to_column() %>%  
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_", remove = FALSE) %>%  
+  # select(-replicate) %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("Freshwater", "Seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("0:100", "25:75", "50:50", "75:25", "100:0"))) %>% 
+  mutate(passage = factor(as.numeric(str_remove(passage, "^p"))))
+# mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"))) 
+
+head(df)
+
+# only color by water
+(p1 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = watertype, shape = watertype), size = 2.5, stroke = 0.1) + 
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_manual(values = c("#4575B4", "#D73027"), guide=guide_legend(override.aes = list(shape=21)), name = "Culture water") +
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme)
+
+# facet by mixing ratios
+(p2 <- ggplot(df, aes(PC1, PC2, shape = watertype, fill = mix)) +
+    geom_point(size = 2.5, alpha = 0.6, stroke = 0.1) + 
+    facet_grid(watertype ~ passage) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio\n(fresh:sea)")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme)
+
+# facet by passage
+(p3 <- ggplot(df, aes(PC1, PC2, shape = watertype, fill = passage)) +
+    geom_point(size = 2.5, alpha = 0.6, stroke = 0.1) + 
+    facet_grid(watertype ~ mix) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    scale_fill_brewer(palette = "YlGn", guide=guide_legend(override.aes = list(shape=21)), name = "Passages")+
+    scale_shape_manual(values = c(22, 21), guide = "none") +
+    mytheme)
+
+# (p23 <- ggarrange(p2, p3, labels = c("A", "B"), font.label = list(size = 10), widths = c(1, 0.7), nrow = 2, ncol = 1))
+
+# ggsave(paste0(folder_path, "PCA_all_combined_facet_clr_no_p0_legend.pdf"), width = 8, height = 6, p23)
+
+
+# PCA plot with family names when their length at PC1 or PC2 > threshold
+
+(p4 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = mix, shape = watertype), size = 3.5, alpha = 0.6, stroke = 0.1) + 
+    geom_text(aes(label = passage), size = 1.2, alpha = 0.4, color = "black") +
+    geom_segment(data = filtered_species, aes(x = 0, y = 0, xend = PC1, yend = PC2), arrow = arrow(length = unit(0.2, "cm")), linewidth = 0.1, color = "black", alpha = 0.6) +
+    geom_text(data = filtered_species, aes(x = PC1*0.95, y = PC2*0.95, label = rownames(filtered_species)), color = "black", alpha = 0.8, size = 3, vjust = -0.5) +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio\n(fresh:sea)")+
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme)
+
+# ggsave(paste0(folder_path,"PCA_water_family_kraken_barbell_clr_water_mix_no_p0_raw.pdf"), width = 5, height = 3.5, p4)
+
+# make plot without arrows
+summary(df)
+
+# make the bundary
+min_x = min(df$PC1) + 0.2
+max_x = max(df$PC1) + 0.2
+min_y = min(df$PC2) + 0.2
+max_y = max(df$PC2) + 0.2
+
+colors <- brewer.pal(n = 11, name = "RdYlBu")
+print(colors)
+
+
+(p5 <- ggplot(df, aes(PC1, PC2)) +
+    geom_point(aes(fill = mix, shape = watertype), size = 3, alpha = 0.6, stroke = 0.1) + 
+    geom_text(aes(label = passage), size = 2, alpha = 0.4, color = "black") +
+    labs(x = paste("PCA1 (", round(sum_pca$cont$importance[2, 1] * 100, 2), "%)", sep = ""), 
+         y = paste("PCA2 (", round(sum_pca$cont$importance[2, 2] * 100, 2), "%)", sep = ""), 
+         title = "") +
+    # scale_x_continuous(limits = c(min_x, max_x)) +
+    # scale_y_continuous(limits = c(min_y, max_y)) +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio\n(fresh:sea)") +
+    scale_shape_manual(values = c(22, 21), name = "Culture water") +
+    mytheme)
+
+# ggsave(paste0(folder_path, "PCA_water_family_kraken_barbell_clr_water_mix_no_p0_all.png"), width = 4.5, height = 3, p5)
+
+
+
+###########################
+# permanova
+###########################
+
+# Permutational Multivariate Analysis of Variance Using Distance Matrices
+
+dist <- vegdist(com, method = "euclidean") 
+
+df <- as.data.frame(com[,1:2]) %>% 
+  rownames_to_column() %>%  
+  select(rowname) %>% 
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_", remove = FALSE) %>%  
+  column_to_rownames(var = "rowname") %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("freshwater", "seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"))) %>% 
+  mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6")))
+
+head(df)
+
+all(rownames(as.matrix(dist)) == rownames(df))
+
+# # three-way permanova
+set.seed(123)
+# sequential tests
+result_whole <- adonis2(dist ~ mix*watertype*passage, data = df, permutation = 999, by = "terms")
+#result_whole <- adonis2(com ~ mix*watertype*passage, data = df, method = "euclidean", permutation = 999)
+result_whole
+
+# write.csv(result_whole, paste0(folder_path, "permanova_water_mix_passage_family_Aitchison.csv"))
+
+```
+
+
+#### 2.2 Dissimilarity to source communities analysis
+To assess the influence of each source community on the coalesced community.
+
+```{r}
+
+# pairwise dissimilarity
+dist <- vegdist(com, method = "euclidean", binary = FALSE, diag = 1) 
+
+# Convert distance to dissimilarity in the range [0, 1]
+# dissimilarity <- dist / max(dist)
+
+# df <- as.matrix(dissimilarity)
+df <- as.matrix(dist)
+df <- data.frame(as.table(df))[lower.tri(df, diag = FALSE), ]
+cat("For no. of df pairs: Observed = Predict", (240*240-240)/2 == length(df$Freq), "\n")
+row.names(df) <- paste(df$Var1, df$Var2, sep = "_")
+summary(df)
+
+# define source communities, i.e. f100-f & b100-b 
+df_source <- df[grepl("f100_b0_f", df$Var1) | grepl("f100_b0_f", df$Var2) | grepl("f0_b100_b", df$Var1) | grepl("f0_b100_b", df$Var2), ]
+
+df_source <- df_source %>% 
+  rownames_to_column(var = "name") %>% 
+  separate(name, c("fresh_a", "sea_a", "water_a", "passage_a", "replicate_a", "fresh_b", "sea_b", "water_b", "passage_b", "replicate_b"), "_", remove = FALSE) %>%
+  filter(passage_a == passage_b) %>% 
+  select(-c(replicate_a, replicate_b, passage_b)) %>%
+  rename(passage = passage_a) %>% 
+  mutate(passage = factor(gsub("p", "", passage))) %>% 
+  unite(a, c(fresh_a, sea_a), sep = "_", remove = TRUE) %>% 
+  unite(b, c(fresh_b, sea_b), sep = "_", remove = TRUE) %>% 
+  select(-c(Var1, Var2)) %>%
+  column_to_rownames(var = "name")
+
+dim(df_source)
+tail(df_source)
+
+
+# in freshwater media
+f_levels <- c("f100_b0_f", "f75_b25_f", "f50_b50_f", "f25_b75_f", "f0_b100_f", "f0_b100_b")
+
+df_f <- df_source %>% 
+  unite(mix_a, c(a, water_a), sep = "_") %>% 
+  unite(mix_b, c(b, water_b), sep = "_") %>% 
+  mutate(mix_a = factor(mix_a)) %>% 
+  mutate(mix_b = factor(mix_b)) %>% 
+  filter(mix_a %in% f_levels & mix_b %in% f_levels) %>% 
+  unite(mix, c(mix_a, mix_b), sep = "_") %>% 
+  mutate(mix = factor(mix)) %>% 
+  filter(mix != "f0_b100_b_f0_b100_b") %>% 
+  droplevels()
+
+df_f$watertype <- "Freshwater"
+
+levels(df_f$mix)
+
+# Add source_com and mix_ratio columns
+df_f <- df_f %>%
+  mutate(
+    source_com = ifelse(grepl("f0_b100_b", mix), "sea", "fresh"),
+    mix_ratio = case_when(
+      grepl("f0_b100_f", mix) ~ "0:100",
+      grepl("f25_b75", mix) ~ "25:75",
+      grepl("f50_b50", mix) ~ "50:50",
+      grepl("f75_b25", mix) ~ "75:25",
+      TRUE ~ "100:0"  # Default value
+    )
+  ) %>% 
+  mutate(mix_simple = paste(mix_ratio, "vs.", source_com))
+
+f_factor_levels <- c("100:0 vs. fresh", 
+                     "75:25 vs. fresh", 
+                     "50:50 vs. fresh", 
+                     "25:75 vs. fresh",
+                     "0:100 vs. fresh",
+                     "100:0 vs. sea",  
+                     "75:25 vs. sea", 
+                     "50:50 vs. sea", 
+                     "25:75 vs. sea", 
+                     "0:100 vs. sea")
+
+# I should have 4*4*6 pairs for each coalesced com to a source comunity, for the source community itsefl, which should have 6*6 pairs
+df_f <- df_f %>% 
+  mutate(mix_simple = factor(mix_simple, levels = f_factor_levels)) 
+
+# check results
+head(df_f)
+dim(df_f) # number of rows should be 900 (96*9 + 36)
+df_f %>% filter(mix_ratio == "25:75" & source_com == "sea" & passage == "1") 
+
+
+# in seawater media
+s_levels <- c("f0_b100_b", "f25_b75_b", "f50_b50_b", "f75_b25_b", "f100_b0_b", "f100_b0_f")
+
+df_s <- df_source %>% 
+  unite(mix_a, c(a, water_a), sep = "_") %>% 
+  unite(mix_b, c(b, water_b), sep = "_") %>% 
+  mutate(mix_a = factor(mix_a)) %>% 
+  mutate(mix_b = factor(mix_b)) %>% 
+  filter(mix_a %in% s_levels & mix_b %in% s_levels) %>% 
+  unite(mix, c(mix_a, mix_b), sep = "_") %>% 
+  mutate(mix = factor(mix)) %>% 
+  filter(mix != "f100_b0_f_f100_b0_f") %>%
+  droplevels()
+
+df_s$watertype <- "Seawater"
+
+levels(df_s$mix)
+
+# Add source_com and mix_ratio columns
+df_s <- df_s %>%
+  mutate(
+    source_com = ifelse(grepl("f100_b0_f", mix), "fresh", "sea"),
+    mix_ratio = case_when(
+      grepl("f100_b0_b", mix) ~ "100:0",
+      grepl("f25_b75", mix) ~ "25:75",
+      grepl("f50_b50", mix) ~ "50:50",
+      grepl("f75_b25", mix) ~ "75:25",
+      TRUE ~ "0:100"  # Default value
+    )
+  ) %>% 
+  mutate(mix_simple = paste(mix_ratio, "vs.", source_com))
+
+b_factor_levels <- c("100:0 vs. fresh",
+                     "75:25 vs. fresh",
+                     "50:50 vs. fresh", 
+                     "25:75 vs. fresh", 
+                     "0:100 vs. fresh", 
+                     "100:0 vs. sea",
+                     "75:25 vs. sea",
+                     "50:50 vs. sea",
+                     "25:75 vs. sea", 
+                     "0:100 vs. sea")
+
+df_s <- df_s %>% 
+  mutate(mix_simple = factor(mix_simple, levels = b_factor_levels))
+
+# check results
+dim(df_s) # number of rows should be 900 (96*9 + 36)
+df_s %>% filter(mix_ratio == "0:100" & source_com == "sea" & passage == "1") 
+
+# combine results from freshwater and seawater
+df_fs <- rbind(df_f, df_s) %>% 
+  select(mix, watertype, mix_simple, mix_ratio, source_com, passage, Freq)
+str(df_fs)
+
+cat("I should have these much pairs", (9*16+6)*6*2)
+warning("Check if the row number is right or not?!")
+
+
+###########################
+# box plot 
+###########################
+
+# compare two source communities
+(p <- ggplot(df_fs, aes(passage, Freq, fill = mix_simple)) +
+   geom_boxplot(alpha = 0.8, position = position_dodge(0.8), outlier.size=-1, linewidth = 0.1) +
+   geom_point(size = 1, stroke = 0.1, position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8), shape = 21, color = "black", alpha = 0.6) +
+   facet_grid(watertype~.) +
+   labs(x = "Passages", y = "Aitchison distance to the native/source communities", title = "") +
+   scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio vs. native com.\n(fresh:sea)", direction = -1) + 
+   mytheme) #+
+# theme(panel.background = element_rect(fill = "lavenderblush1"),
+#       strip.text = element_blank())) 
+
+# ggsave(paste0(folder_path, "distance_to_source_communities_box_plot_raw.pdf"), width = 7, height = 3.5, p)
+
+
+df_fs1 <- df_fs %>% 
+  mutate(source_com = factor(source_com, levels = c("fresh", "sea"), labels = c("freshwater community", "seawater community"))) %>% 
+  mutate(mix_ratio = factor(mix_ratio, levels = c("100:0", "75:25", "50:50", "25:75", "0:100" )))
+
+# compare two culturing water conditions
+(p <- ggplot(df_fs1, aes(interaction(watertype, passage), Freq, fill = mix_ratio)) +
+    geom_boxplot(alpha = 0.8, position = position_dodge(0.8), outlier.size=-1, linewidth = 0.1) +
+    geom_point(size = 1, stroke = 0.1, position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8), shape = 21, color = "black", alpha = 0.6) +
+    facet_grid(source_com~.) +
+    labs(x = "Culturing water x Passages", y = "Aitchison distance to the native communities", title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio vs. native com.\n(fresh:sea)", direction = -1) + 
+    mytheme ) # + theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+
+# ggsave(paste0(folder_path, "distance_to_source_communities_box_plot_source_com_raw.pdf"), width = 9, height = 3.8, p)
+
+
+###########################
+# line plot for all passages
+###########################
+
+df_fs1 <- df_fs %>% 
+  separate(mix_ratio, c("fresh_ratio", "sea_ratio"), ":", remove = FALSE) %>% 
+  select(-c(mix, mix_simple))
+
+df_fs1 <- df_fs1 %>%
+  mutate(source_ratio = if_else(source_com == "fresh", fresh_ratio, sea_ratio))
+
+df_fs1$source_ratio <- as.numeric(as.character(df_fs1$source_ratio))
+df_fs1$fresh_ratio <- as.numeric(as.character(df_fs1$fresh_ratio))
+
+head(df_fs1)
+
+# Step 1: Compute p-values for each group
+lm_results <- df_fs1 %>%
+  group_by(watertype, source_com) %>%
+  do({
+    model <- lm(Freq ~ source_ratio, data = .)
+    tidy(model)  # Extract regression statistics
+  }) %>%
+  filter(term == "source_ratio") %>%  # Only keep slope term (not intercept)
+  mutate(significant = p.value < 0.05)  # Mark significant regressions
+
+# Step 2: Merge with original data to keep significant groups only
+df_filtered <- df_fs1 %>%
+  inner_join(lm_results, by = c("watertype", "source_com")) %>% 
+  mutate(source_com = factor(source_com, levels = c("fresh", "sea"), labels = c("Freshwater\nSource Community", "Seawater\nSource Community")))
+
+df_fs1 <- df_fs1 %>% 
+  mutate(source_com = factor(source_com, levels = c("fresh", "sea"), labels = c("Freshwater\nSource Community", "Seawater\nSource Community")))
+head(df_filtered)
+str(df_fs1)
+
+# Step 3: line plot 
+
+# line plot - combine all passages
+(p <- ggplot(df_fs1, aes(fresh_ratio, Freq, fill = source_com, color = source_com)) +
+    geom_point(size = 1.5, alpha = 0.05, position = position_jitter(width = 4)) +
+    scale_x_continuous( breaks = c(0, 25, 50, 75, 100),  labels = c("0:100", "25:75", "50:50", "75:25", "100:0")) +
+    facet_grid(. ~ watertype ) +
+    geom_smooth(data = df_fs1, method = "lm", aes(color = source_com), size = 0.5, alpha = 0.3) +  
+    # geom_smooth(method = "lm", aes(color = source_com), alpha = 0.6) +  # Match regression line colors
+    # Plot regression lines only for significant groups
+    # Add regression equation, R², and p-value
+    stat_poly_eq(
+      aes(label = after_stat(paste(..eq.label.., ..rr.label.., ..p.value.label.., sep = "~~~"))),
+      formula = y ~ x, 
+      parse = TRUE, 
+      size = 2.5) +
+    labs(x = "Mixing ratio\n(fresh:sea)", y = "Aitchison distance", title = "") +
+    scale_fill_manual(values = c("#4575B4", "#D73027"), guide=guide_legend(override.aes = list(shape=21)), name = "Distance to") +
+    scale_color_manual(values = c("#4575B4", "#D73027"), name = "Distance to") +
+    mytheme +
+    theme(legend.position.inside = c(0.95, 0.95)))
+
+# ggsave(paste0(folder_path, "distance_to_source_communities_line_plot_clr_all_raw.pdf"), width = 6, height = 3, p)
+
+
+
+####################
+# line plot in facet
+####################
+
+# Step 1: Compute p-values for each group
+lm_results <- df_fs1 %>%
+  group_by(watertype, passage, source_com) %>%
+  do({
+    model <- lm(Freq ~ source_ratio, data = .)
+    tidy(model)  # Extract regression statistics
+  }) %>%
+  filter(term == "source_ratio") %>%  # Only keep slope term (not intercept)
+  mutate(significant = p.value < 0.05)  # Mark significant regressions
+
+# Step 2: Merge with original data to keep significant groups only
+df_filtered <- df_fs1 %>%
+  inner_join(lm_results %>% filter(significant), by = c("watertype", "passage", "source_com"))
+
+
+# Step 3: line plot in facet
+(p <- ggplot(df_fs1, aes(source_ratio, Freq, fill = source_com, color = source_com)) +
+    geom_point(size = 2, alpha = 0.2) +
+    # geom_smooth(method = "lm", aes(color = source_com), alpha = 0.6) +  # Match regression line colors
+    # Plot regression lines only for significant groups
+    geom_smooth(data = df_filtered, method = "lm", aes(color = source_com), alpha = 0.7) +  
+    # Add regression equation, R², and p-value
+    stat_poly_eq(
+      aes(label = after_stat(
+        paste(..eq.label.., ..rr.label.., ..p.value.label.., sep = "~~~")
+      )),
+      formula = y ~ x, 
+      parse = TRUE, 
+      size = 1.8) +
+    facet_grid(watertype~passage) +
+    scale_x_continuous(
+      breaks = c(0, 25, 50, 75, 100),  # Define break points
+      labels = c("0:100", "25:75", "50:50", "75:25", "100:0")) +
+    labs(x = "", y = "Aitchison distance to the native/source communities", title = "") +
+    scale_fill_manual(values = c("#4575B4", "#D73027"), guide=guide_legend(override.aes = list(shape=21)), name = "Native/source community") + 
+    scale_color_manual(values = c("#4575B4", "#D73027"), name = "Native/source community") +
+    mytheme +
+    theme(legend.position = "bottom"))
+
+# ggsave(paste0(folder_path, "distance_to_source_communities_line_plot_raw.png"), width = 10, height = 4, p)
+
+
+###########################
+# dis to source on two axis
+###########################
+
+# reorganize the data.frame
+df_dis <- df_fs %>% 
+  select(-c(mix, mix_simple)) %>% 
+  group_by(watertype, mix_ratio, source_com, passage) %>% 
+  mutate(seq_number = row_number()) %>%
+  pivot_wider(names_from = c(source_com), values_from = Freq) %>% 
+  mutate(mix_ratio = factor(mix_ratio, levels = c("0:100", "25:75", "50:50", "75:25", "100:0"))) %>% 
+  drop_na()
+
+# check 
+summary(df_dis)
+df_dis %>% filter(watertype == "Freshwater" & mix_ratio == "100:0" & passage == "1") %>% print()
+# write.csv(df_dis, paste0(folder_path, "distance_to_source_com_check.csv"))
+
+# Compute regression statistics for each combination of watertype and passage
+regression_results <- df_dis %>%
+  group_by(watertype, passage) %>%
+  summarize(
+    model = list(lm(sea ~ fresh, data = cur_data())),
+    p_value = summary(model[[1]])$coefficients[2, 4]  # Extract p-value for fresh
+  ) %>%
+  filter(p_value < 0.05)  # Keep only significant regressions
+
+# Merge with original data to keep only groups with significant regressions
+df_filtered <- df_dis %>% inner_join(regression_results, by = c("watertype", "passage"))
+
+
+# plot distance to two source communities
+(p <- ggplot(df_dis, aes(x = fresh, y = sea)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "darkred", alpha = 0.5, size = 0.8) +  # y = x line
+    geom_point(aes(fill = mix_ratio, shape = watertype), size = 2, stroke = 0.1, color = "black", shape = 21, alpha = 0.6) +
+    # geom_smooth(data = df_filtered, aes(x = fresh, y = sea), method = "lm", formula = y ~ x, se = FALSE) +  # Regression line only for significant ones
+    # stat_regline_equation(data = df_filtered, aes(label = paste(..eq.label.., sep = "~~~")), size = 3) +  # Regression equation
+    # stat_cor(data = df_filtered, aes(label = paste("p =", p_value)), size = 3) +  # P-value
+    facet_grid(watertype ~ passage) +
+    labs(x = "Aitchison to freshwater source communities", y = "Aitchison to seawater source communities", title = "") +
+    scale_fill_brewer(palette = "RdYlBu", guide=guide_legend(override.aes = list(shape=21)), name = "Mixing ratio \n(fresh:sea)") +
+    xlim(8.1, 24) +  # Set x-axis limits
+    ylim(8.1, 24) +  # Set y
+    mytheme)
+
+# ggsave(paste0(folder_path, "distance_to_source_coms.png"), plot = p, width = 9, height = 3.3)
+
+
+# Summarize mean and standard error for fresh and sea
+df_summary <- df_fs %>%
+  select(-c(mix, mix_simple)) %>% 
+  group_by(watertype, mix_ratio, passage, source_com) %>%  # Group by relevant factors
+  summarise(
+    mean = mean(Freq, na.rm = TRUE),
+    se = sd(Freq, na.rm = TRUE) / sqrt(n())) %>%
+  ungroup() %>% 
+  arrange(passage, mix_ratio) %>% 
+  pivot_wider(names_from = source_com, values_from = c(mean, se), names_glue = "{.value}_{source_com}") %>% 
+  mutate(mix_ratio = factor(mix_ratio, levels = c("0:100", "25:75", "50:50", "75:25", "100:0")))
+
+summary(df_summary)
+# y = -x+a
+a <- max(df_summary$mean_fresh) + min(df_summary$mean_sea)
+
+min_xylim <- min(min(df_summary$mean_sea), min(df_summary$mean_fresh))
+max_xylim <- max(max(df_summary$mean_sea), max(df_summary$mean_fresh))
+
+# extract the color codes from the "RdYlBu" palette using the RColorBrewer
+# display.brewer.pal(5, "RdYlBu")
+# (colors <- brewer.pal(5, "RdYlBu"))
+colors <- c("#D7191C", "#FDAE61", "gold2", "#ABD9E9", "#2C7BB6")
+
+# Plot mean and standard error with connections
+(p <- ggplot(df_summary, aes(x = mean_fresh, y = mean_sea, shape = passage)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "darkred", alpha = 0.2, size = 0.4) +  # y = x line
+    # geom_abline(slope = -1, intercept = a, linetype = "dashed", color = "darkblue", alpha = 0.2, size = 0.4) +  # y = x line
+    geom_errorbar(aes(ymin = mean_sea - se_sea, ymax = mean_sea + se_sea, color = mix_ratio), linewidth = 0.2, width = 0.1, alpha = 0.1, position = position_dodge(0.3)) +  # SE as error bars
+    geom_errorbarh(aes(xmin = mean_fresh - se_fresh, xmax = mean_fresh + se_fresh, color = mix_ratio), linewidth = 0.2, height = 0.1, alpha = 0.1, position = position_dodge(0.3)) +  # Horizontal SE error bars
+    geom_path(aes(group = mix_ratio, color = mix_ratio), linewidth = 0.2, alpha= 0.2) +
+    # geom_point(aes(fill = mix_ratio, shape = watertype), size = 1, stroke = 0.1, alpha= 0.7, color = "black", shape = 21) +
+    geom_text(aes(label = passage, color = mix_ratio), size = 3) +
+    # facet_grid(watertype ~ mix_ratio) +
+    facet_grid(. ~ watertype) +
+    labs(x = "Aitchison to native freshwater communities", y = "Aitchison to native seawater communities", title = "") +
+    scale_color_manual(values = colors, name = "Mixing ratio \n(fresh:sea)") +
+    xlim(min_xylim, max_xylim) +  
+    ylim(min_xylim, max_xylim) +  
+    mytheme)
+
+# ggsave(paste0(folder_path, "distance_to_source_coms_mean_se_with_lines_facet1.png"), plot = p, width = 5.5, height = 2.8)
+# ggsave(paste0(folder_path, "distance_to_source_coms_mean_se_with_lines_nr_raw2.pdf"), plot = p, width = 5.5, height = 2.8)
+
+```
+
+
+### Session Info
+```{r}
+sessionInfo()
+```
