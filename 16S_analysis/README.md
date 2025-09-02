@@ -2,33 +2,93 @@
 We got **14.29 M raw reads** of full length 16S RNA gene in pod5 files, which were generated from the FLO-MIN114 flowcell :dna: using the SQK-LSK114 kit.
 
 ## Basecalling
-I used [**Dorado (v0.6.0)**](https://github.com/nanoporetech/dorado/tree/release-v0.6.0) to do basecalling.
+I used [**Dorado (v0.9.1)**](https://github.com/nanoporetech/dorado/tree/release-v0.9) to do basecalling.
 We got 17M reads after basecalling by Dorado, with 4M “redundant” reads, which are so called "simplex have duplex offsprings". I used non_redundant.fastq.gz (12.9M reads) file for further demultiplexing test. \
 Xiu: Maybe I should do quality and sequence length control before demultiplexing.
-```
-/.../dorado/v0.6.0/bin/dorado duplex \
-/.../dorado/v0.6.0/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0 \
-data/pod5/ > duplex.bam
 
-/.../tools/samtools/v1.17/bin/samtools view --tag dx:1 --tag dx:0 \
-results_dorado_no_demultiplexing/duplex.bam | gzip -9 > results_dorado_no_demultiplexing/non_redundant.fastq.gz
 ```
+/.../dorado/v0.9.1/bin/dorado  basecaller --emit-fastq \
+        /.../dorado/v0.9.1/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0 \
+        --trim 'adapters' \
+        ../raw_data_jena/240202_16S_amplicons_***/20240202_1646_MN41792_FAW73518_3914cd2c/pod5/ \
+        -o results_dorado_0.9
+
+gzip -c results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq.gz > results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq
+
+## nanoplot
+source /vast/groups/VEO/tools/anaconda3/etc/profile.d/conda.sh && conda activate nanoplot_v1.41.3
+
+# make nanoplot for all the samples
+NanoPlot -t 2 --fastq results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq -o results_nanoplot/Dorado_0.9/all
+
+```
+
+
 ## Demultiplexing
 ### Barbell
 We used [**Barbell**](https://github.com/rickbeeloo/barbell) which is developed by Rick Beloo to demultiplex raw 16S reads. \
 From 12.9M raw reads, we got **3,686,727 reads** assigned family taxonomic level.
 ```
-# active the env
-source /.../anaconda3/etc/profile.d/conda.sh
-conda activate Barbell_new
+#!/bin/bash
+#SBATCH --job-name demultiplex_barbell-sg-v0.1.5_without_adapters
+#SBATCH --partition=short
+#SBATCH --mem=8G
+#SBATCH --cpus-per-task=8
+#SBATCH --output tmp/demultiplex_barbell-sg-v0.1.5_without_adapters.%j.out
+#SBATCH --error  tmp/demultiplex_barbell-sg-v0.1.5_without_adapters.%j.err
+#SBATCH --mail-type=FAIL,END
+#SBATCH --mail-user=***
 
-# run barbell
-/.../my_tools/barbell-main_2/target/release/barbell \
-        -c configs_barbell/config.toml \
-        -s configs_barbell/samples.txt \
-        -r results_dorado/non_redundant.fastq \
-        -t 16 \
-        -o results_barbell
+# Run barbell-sg using the following path
+barbell="/.../my_tools/barbell-sg-v0.1.5/target/release/barbell"
+
+# Define paths of main output folder and input files
+out_dir="results_barbell_sg/results_without_adapters"
+raw_fastq="results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq"
+fwd_primers="results_barbell_sg/forward_primer_barcodes.fasta"
+rev_primers="results_barbell_sg/reverse_primer_barcodes.fasta"
+
+# Create output directory if it doesn't exist
+mkdir -p "$out_dir"
+
+# Annotate
+$barbell annotate \
+    -i "$raw_fastq" \
+    -q "$fwd_primers","$rev_primers" \
+    -o $out_dir/annotations_without_adapters.txt \
+    -t 8 \
+    --tune
+
+# Inspect
+$barbell inspect -i $out_dir/annotations_without_adapters.txt
+
+# Option 1: consider reads with only 2 barcode annotations
+
+# Filter
+$barbell filter \
+    -i $out_dir/annotations_without_adapters.txt \
+    -o $out_dir/filtered_without_adapters_2barcodes.txt \
+    -f results_barbell_sg/rapid_filters_250_1300_1500.txt
+
+# Trim
+$barbell trimm \
+    -i $out_dir/filtered_without_adapters_2barcodes.txt \
+    -r "$raw_fastq" \
+    -o $out_dir/trimmed_without_adapters_2barcodes
+
+# Option 2: consider concatenated reads
+
+# Filter
+$barbell filter \
+    -i $out_dir/annotations_without_adapters.txt \
+    -o $out_dir/filtered_without_adapters_conctas.txt \
+    -f results_barbell_sg/rapid_filters_250_1300_1500_2_3_concats.txt
+
+# Trim
+$barbell trimm \
+    -i $out_dir/filtered_without_adapters_conctas.txt \
+    -r "$raw_fastq" \
+    -o $out_dir/trimmed_without_adapters_concta
 ```
 
 ### prob-edit-rs
@@ -49,13 +109,13 @@ We assigned taxonomy to the raw reads by using [**Kraken2**](https://github.com/
 #SBATCH --mail-user=...
 
 # https://github.com/DerrickWood/kraken2/wiki/Manual
-kraken2_db="/work/groups/VEO/databases/kraken2/v20180901"
+kraken2_db="/.../database/16S_SILVA138_k2db/"
 
 # Input directory containing the FASTQ files
-input_dir="results_barbell"
+input_dir="results_barbell_sg/results_with_adapters/renamed_with_adapters_concats/"
 
 # Output directory where filtered FASTQ files will be saved
-output_dir="results_kraken2_barbell_2"
+output_dir="results_kraken2_barbell_adapter_concats_silva_182"
 
 
 # Assign taxonomy
@@ -65,16 +125,17 @@ mkdir -p "$output_dir"
 for file in $input_dir/*.fastq; do
   # Extract the base name of the file (without path and extension)
 
-  filename=$(basename "$file")
+  filename=$(basename "$file" .fastq)
 
   # Run Kraken2 on the current FASTQ file
-  /.../VEO/tools/kraken2/v2.1.2/kraken2 \
+  /.../tools/kraken2/v2.1.5/kraken2 \
           --db $kraken2_db \
-          --threads 20 \
+          --threads 10 \
+          --use-mpa-style \
           --report $output_dir/${filename}_report.txt \
           --output $output_dir/${filename}_output.txt $file
 
-  echo "Processed $file with Kraken2 and saved results to $kraken_output_dir"
+  echo "Processed $file with Kraken2 and saved results to $output_dir"
 
 done
 
@@ -85,7 +146,7 @@ echo "\nstart Kraken2 result summary by python code"
 
 source /.../my_tools/mypyenv/bin/activate
 
-python3.9 /.../my_tools/KrakenTools/combine_kreports.py -r $output_dir/*_report.txt -o kraken2_combined_abundance_report.txt
+python3.9 /.../my_tools/KrakenTools/combine_kreports.py -r $output_dir/*_report.txt -o kraken2_combined_abundance_report_adapter_concats_silva_182.txt
 
 deactivate
 ```
