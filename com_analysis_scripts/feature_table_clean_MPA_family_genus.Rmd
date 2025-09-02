@@ -1,0 +1,532 @@
+---
+title: "Feature table preparation"
+author: "Jia Xiu (xibeihenai@gmail.com)"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+Kraken2.1.5
+SILVA182
+Barbell 0.1.5 with concatenated reads
+
+#### Coalescence experiment - Microbiome - 16S
+> I used the Kraken2 results with MPA-style based on silva 16S dataset 138.2.
+
+> The MPA style (short for Metagenomic Phylogenetic Analysis style) in taxonomy annotation refers to a standardized format for representing taxonomic classifications. It is often used in bioinformatics tools such as Kraken2 and HUMAnN to organize hierarchical taxonomic information in a consistent way.
+
+## 1. Initiate libraries
+```{r load_packages_01, message=FALSE}
+
+rm(list=ls())
+
+library(tidyverse)
+library(phyloseq) # for prepare pyloseq object for network analysis
+
+```
+
+
+## 2. Load raw feature table, taxonomy and metadata file
+Load feature table assigned taxonomy by Kraken2, which is only assigned at genus level
+```{r}
+
+# check how many reads annotated as bacteria
+com_bac <- read.csv("kraken2_combined_abundance_report_adapter_concats_silva_182_bacteria.csv", header = TRUE, sep = ",") %>% 
+  filter(taxonomy == "d__Bacteria") %>% 
+  column_to_rownames(var = "taxonomy")
+
+com_bac <- as.data.frame(t(com_bac))
+head(com_bac)
+# write.csv(com_bac, "total_number_of_reads_bacteria.csv")
+
+# load raw feature table. I removed all the non bacteria taxa manual (so siple that I didn't even thought about it. thanks Aris)
+com_f_g <- read.csv("kraken2_combined_abundance_report_adapter_concats_silva_182_bacteria.csv", header = TRUE, sep = ",") %>% 
+  filter(str_detect(taxonomy, "f__|g__"))
+
+dim(com_f_g)
+
+# load metadata file of all samples
+metadata <- read.csv("metadata_16S_17-08-2024.tsv", header = 1, sep = "\t")
+metadata <- metadata %>% 
+  select(-c(X27FBarcodeNumber, X1492RBarcodeNumber)) %>% 
+  select(-sample.id) %>% 
+  column_to_rownames(var = "SampleName")
+
+tail(metadata)
+
+```
+
+
+## 3. Family level with raw reads
+
+```{r}
+
+# OTU table
+com_family <- com_f_g %>% 
+  filter(!str_detect(taxonomy, "g__")) %>% 
+  column_to_rownames(var = "taxonomy")
+
+dim(com_family)
+sum(colSums(com_family))
+com_family[1:2, 1:2]
+
+
+# taxonomy table
+tax_family <- com_family %>%
+  rownames_to_column(var = "taxonomy") %>% 
+  select(taxonomy, EvenMock_r1) %>% # keep EvenMock_r1 temperately to maintain a data.frame format
+  separate(taxonomy, c("Domain", "Phylum", "Class", "Order", "Family"), "\\|", fill = "right", remove = FALSE) %>% # fill with missing values on the right
+  column_to_rownames(var = "taxonomy") %>%
+  mutate(across(everything(), ~ sub("^[a-z]__", "", .))) %>% # Removes the prefixes (d__, p__, etc.) using a regular expression.
+  select(-EvenMock_r1)
+
+table(table(tax_family$Family))
+tax_family[tax_family$Phylum == "Actinobacteriota" & tax_family$Family == "uncultured", c("Family")]
+tax_family[tax_family$Family == "Unknown Family", c("Family")]
+# there are 33 uncultured and 3 unknown families
+
+tax_family <- tax_family %>% 
+  mutate(Family = ifelse(grepl("uncultured|Unknown", Family), 
+                         paste0(Order, "_", Family), 
+                         Family))
+
+dim(tax_family)
+range(table(tax_family$Family))
+# check the total number of reads per family. 
+summary(rowSums(com_family))
+
+# Clean the feature table by removing the low abundant species 
+# Define the threshold value to remove families with a total abundance less than 3 and that occur in fewer than 3 samples,
+threshold <- 3
+
+# Remove rows where the sum and occurence of all columns is less than the threshold
+com_family_filtered <- com_family %>%
+  filter(rowSums(across(everything())) >= threshold) %>% 
+  filter(rowSums(across(everything(), ~ . > 0)) >= threshold)
+
+com_family_filtered[1:2, 1:2]
+dim(com_family_filtered)
+
+# Total number of reads per sample
+summary(colSums(com_family_filtered))
+
+# Total reads per family
+summary(rowSums(com_family_filtered))
+
+#check the total number of reads that has been assigned to family level
+number_of_reads <- data.frame(total_number_reads = colSums(com_family_filtered)) %>% 
+  rownames_to_column(var = "SampleNO") 
+
+head(number_of_reads)
+# write.csv(number_of_reads, "total_number_of_reads_family.csv")
+
+tax_family_filtered <- tax_family[rownames(tax_family) %in% rownames(com_family_filtered), ]
+dim(tax_family_filtered)
+
+
+# Make phyloseq object - raw reads
+otu_table_phyloseq <- otu_table(as.matrix(com_family_filtered), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_family_filtered))
+
+ps <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps
+
+# saveRDS(ps, file = "phyloseq_object_family_rawreads.rds")
+
+```
+Before filtering, there are `r nrow(com_family)` families. After filtering families with a total abundance less than 3 and that occur in fewer than 3 samples, we got `r nrow(com_family_filtered)` families.
+
+
+
+### CLR and relative abundance phyloseq at family level
+
+#### CLR transformation
+**compositional data** everything that is part of a whole is compositional. the change in one component will affect the other component. By sequencing, you are subsampling. 
+CLR normalization transforms compositional data to address the "closed nature" of relative abundances, $$CLR(xi)=ln(xi/g(x))$$
+
+1. CLR produces values on a continuous scale that are suitable for Euclidean geometry, making it compatible with many statistical methods (e.g., PCA). 
+2. CLR handles compositional bias effectively but can be sensitive to zeros since the logarithm is undefined for zero. 
+3. The sum of each sample in CLR (Centered Log-Ratio) and rCLR (Robust Centered Log-Ratio) transformations will always be zero.
+
+**Robust CLR Transformation**\
+The Robust CLR Transformation is a modification of the standard CLR transformation designed to handle issues that may arise when some components of the compositional data have values of zero or near-zero. Zero values in compositional data can cause the CLR transformation to be undefined because the logarithm of zero is not defined.\
+To avoid issues with zeros, the Robust CLR typically uses a small constant (e.g., adding a small pseudo-count) or applies a more robust estimation method for the geometric mean, such as ignoring zeros or using a trimmed mean. This approach makes the CLR transformation more stable and applicable in real-world situations where zero values are common in compositional data (e.g., microbiome studies, where some taxa may be absent in certain samples).\
+
+**Steps in Robust CLR:**\
+-   1. Replace zeros with a small constant: One common method is to replace zeros with a small positive value, such as the smallest observed value in the dataset or a predefined constant (like $e= 1e-6$).
+-   2. Modified geometric mean: In the robust CLR, the geometric mean is computed on the adjusted data (with small constants added to avoid zeros), ensuring stability during the transformation.
+$$CLR(xi)=ln((xi + e)/g(x + e))$$.
+
+```{r}
+
+####################################
+# Option 1. CLR transformation
+# Robust CLR (rCLR): The rCLR transformation modifies the CLR approach by adding a small constant (often called a pseudocount) to the data before performing the log transformation, making it robust to zeros. This approach is especially useful in microbiome data where zeros are common in OTU tables.We performed a centered log-ratio (CLR) transformation of feature table, which has been added a small pseudocount, 10^-6. 
+otu_table <- as.data.frame(t(com_family_filtered)) # samples in rows, species in columns
+
+# Add pseudocount to handle zeros
+pseudocount <- 1e-6
+otu_table <- otu_table + pseudocount
+
+# CLR Transformation
+com_family_rclr <- t(apply(otu_table, 1, function(x) log(x) - mean(log(x))))
+com_family_rclr <- as.data.frame(t(com_family_rclr))
+
+# check if the sum of each sample approximate zero
+range(round(colSums(com_family_rclr), 5))
+
+com_family_rclr[1:2, 1]
+
+# Make phyloseq object - rclr
+otu_table_phyloseq <- otu_table(as.matrix(com_family_rclr), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_family_filtered))
+
+ps_rclr <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps_rclr
+
+# saveRDS(ps_rclr, file = "phyloseq_object_family_rclr.rds")
+
+####################################
+# Option 2 CLR # based on https://www.youtube.com/watch?v=ulo7WatBEAo&ab_channel=RiffomonasProject
+# The CLR transformation does not replace zeros. Instead, only non-zero features are transformed, using the geometric mean of non-zero features as denominator.
+
+# geometric mean for only non-zero values
+gm <- function(x) {
+  exp(mean(log(x[x>0])))
+}
+
+
+# robust clr remove zeros
+com_family_clr <- com_family_filtered %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Family") %>%
+  pivot_longer(-Family, values_to = "reads", names_to = "Sample") %>%
+  filter(reads != 0) %>%
+  group_by(Sample) %>%
+  mutate(rclr = log(reads/gm(reads))) %>%
+  ungroup() %>%
+  select(-reads) %>%
+  pivot_wider(names_from = "Sample", values_from = "rclr", values_fill = 0) %>% # if there are any NA values, we make them zeros
+  as.data.frame() %>%
+  column_to_rownames(var = "Family")
+
+com_family_clr[1:2, 1]
+range(round(colSums(com_family_clr), 5))
+
+# Make phyloseq object - clr
+otu_table_phyloseq <- otu_table(as.matrix(com_family_clr), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_family_filtered))
+
+ps_clr <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps_clr
+
+# saveRDS(ps_clr, file = "phyloseq_object_family_clr.rds")
+
+####################################
+# Option 3 CLR-transformation using r-package compositions
+
+library(compositions)  # for CLR
+
+
+# Assume you already have a phyloseq object
+# For example:
+# ps <- readRDS("your_phyloseq_object.rds")
+
+# Step 1: Extract the abundance table (OTU/ASV)
+otu <- otu_table(ps_rawreads)
+otu_mat <- as(otu, "matrix")
+
+# Step 2: Transpose if taxa are columns
+if (taxa_are_rows(ps_rawreads)) {
+  otu_mat <- t(otu_mat)
+}
+
+# Step 3: Add a pseudocount to avoid zeros
+otu_pseudo <- otu_mat + pseudocount
+
+# Step 4: CLR transform (compositions package works with data frames)
+otu_clr <- compositions::clr(otu_pseudo)
+
+# Step 5: Create phyloseq-compatible OTU table. Transpose back if needed and wrap in otu_table
+otu_clr_table <- otu_table(t(otu_clr), taxa_are_rows = TRUE)
+
+
+# Check that taxon names match
+all(rownames(tax_table(ps_rawreads)) %in% rownames(otu_clr_table))
+
+# If this returns FALSE, inspect:
+head(rownames(tax_table(ps_rawreads)))
+head(rownames(otu_clr_table))
+
+
+# Step 6 (Optional): Create a new phyloseq object with CLR-transformed data
+ps_clr <- phyloseq(otu_clr_table, tax_table(ps_rawreads), sample_data(ps_rawreads))
+
+# Now ps_clr contains CLR-transformed abundances
+# Compare what I did manually
+
+# raw table
+otu[191:210, 7]
+
+# what I did manually
+ps_rclr <- readRDS("phyloseq_object_family_rclr.rds")
+otu_rclr <- otu_table(ps_rclr)
+otu_rclr[191:210, 7]
+
+#from the package
+otu_clr_table[191:210, 7]
+
+####################################
+# Relative abundance 
+com_family_rel <- com_family_filtered %>%
+  mutate(across(everything(), ~ .x / sum(.x)))
+
+# check if the sum of relative abundance per sample is 1 or not 
+range(colSums(com_family_rel))
+com_family_rel[1:2, 1]
+dim(com_family_rel)
+
+# Make phyloseq object - relative abundance
+otu_table_phyloseq <- otu_table(as.matrix(com_family_rel), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_family_filtered))
+
+ps_ra <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps_ra
+
+# saveRDS(ps_ra, file = "phyloseq_object_family_ra.rds")
+
+# Relative abundance 
+com_family_rel <- com_family_filtered %>%
+  mutate(across(everything(), ~ .x / sum(.x)))
+
+# check if the sum of relative abundance per sample is 1 or not 
+range(colSums(com_family_rel))
+com_family_rel[1:2, 1:2]
+dim(com_family_rel)
+
+# Make phyloseq object - relative abundance
+otu_table_phyloseq <- otu_table(as.matrix(com_family_rel), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_family_filtered))
+
+ps_ra <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps_ra
+
+# saveRDS(ps_ra, file = "phyloseq_object_family_ra.rds")
+
+```
+
+
+
+## 4. Genus level with raw reads
+
+```{r}
+
+# OTU table
+com_genus <- com_f_g %>% 
+  filter(str_detect(taxonomy, "g__")) %>% 
+  column_to_rownames(var = "taxonomy")
+
+dim(com_genus)
+sum(colSums(com_genus))
+com_genus[1:2, 1:2]
+
+# check the total number of reads per genus. 
+summary(rowSums(com_genus))
+
+# Clean the feature table by removing the low abundant species 
+# Define the threshold value to remove families with a total abundance less than 3 and that occur in fewer than 3 samples,
+threshold <- 3
+
+# Remove rows where the sum and occurence of all columns is less than the threshold
+com_genus_filtered <- com_genus %>%
+  filter(rowSums(across(everything())) >= threshold) %>% 
+  filter(rowSums(across(everything(), ~ . > 0)) >= threshold)
+
+com_genus_filtered[1:2, 1]
+dim(com_genus_filtered)
+
+# Total number of reads per sample
+summary(colSums(com_genus_filtered))
+
+# Total reads per genus
+summary(rowSums(com_genus_filtered))
+
+#check the total number of reads that has been assigned to genus level
+number_of_reads <- data.frame(total_number_reads = colSums(com_genus_filtered)) %>% 
+  rownames_to_column(var = "SampleNO") 
+
+head(number_of_reads)
+# write.csv(number_of_reads, "total_number_of_reads_genus.csv")
+
+
+
+# taxonomy table
+tax_genus_filtered <- com_genus_filtered %>%
+  rownames_to_column(var = "taxonomy") %>% 
+  select(taxonomy, EvenMock_r1) %>% # keep EvenMock_r1 temperately to maintain a data.frame format
+  separate(taxonomy, c("Domain", "Phylum", "Class", "Order", "Family", "Genus"), "\\|", fill = "right", remove = FALSE) %>% # fill with missing values on the right
+  column_to_rownames(var = "taxonomy") %>%
+  select(-EvenMock_r1) %>% 
+  mutate(across(everything(), ~ sub("^[a-z]__", "", .))) %>% # Removes the prefixes (d__, p__, etc.) using a regular expression.
+  drop_na() # If order or family information are missing,  there are some content of genus are NAs. Check!!
+
+dim(tax_genus_filtered)
+tax_genus_filtered[1:2, 4:6]
+
+# Your enhanced pipeline
+tax_genus_filtered <- com_genus_filtered %>%
+  rownames_to_column(var = "taxonomy") %>%
+  select(taxonomy, EvenMock_r1) %>%
+  mutate(
+    Domain = str_extract(taxonomy, "d__[^|]*"),
+    Phylum = str_extract(taxonomy, "p__[^|]*"),
+    Class = str_extract(taxonomy, "c__[^|]*"),
+    Order = str_extract(taxonomy, "o__[^|]*"),
+    Family = str_extract(taxonomy, "f__[^|]*"),
+    Genus = str_extract(taxonomy, "g__[^|]*")
+  ) %>%
+  # Replace NA with 'x__Unknown' where x is the rank prefix. After "d__", you want to continue matching any sequence of characters that are not |, including zero characters, until you hit a pipe | (or the end of the string). The * ensures that you can match anything up to the next delimiter, |, or even nothing if there’s no further taxonomic information (e.g., just d__Bacteria).
+  mutate(
+    Order = ifelse(is.na(Order), "o__Unknown", Order),
+    Family = ifelse(is.na(Family), "f__Unknown", Family),
+    Genus = ifelse(is.na(Genus), "g__Unknown", Genus)
+  ) %>%
+  # Remove the prefixes
+  mutate(across(Domain:Genus, ~ str_remove(., "^[a-z]__"))) %>%
+  column_to_rownames(var = "taxonomy") %>%
+  select(-EvenMock_r1)
+
+dim(tax_genus_filtered)
+tax_genus_filtered[1:2, c("Family", "Genus")]
+
+# check if there is a mismatch of feature table and taxonomy table
+setdiff(rownames(com_genus_filtered), rownames(tax_genus_filtered))
+# [1] "d__Bacteria|p__Firmicutes|c__Clostridia|f__Hungateiclostridiaceae|g__Fastidiosipila"          
+# [2] "d__Bacteria|p__Firmicutes|c__Clostridia|f__Hungateiclostridiaceae|g__Saccharofermentans"      
+# [3] "d__Bacteria|p__Firmicutes|c__Clostridia|f__Hungateiclostridiaceae|g__uncultured"              
+# [4] "d__Bacteria|p__Firmicutes|c__Clostridia|o__Peptostreptococcales-Tissierellales|g__Parvimonas" 
+# [5] "d__Bacteria|p__Firmicutes|c__Desulfotomaculia|o__Desulfotomaculales|g__Desulfofarcimen"       
+# [6] "d__Bacteria|p__Firmicutes|c__Limnochordia|g__Hydrogenispora"                                  
+# [7] "d__Bacteria|p__Proteobacteria|c__Alphaproteobacteria|o__Ferrovibrionales|g__Taonella"         
+# [8] "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria|o__Enterobacterales|g__Gibbsiella"       
+# [9] "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria|o__Granulosicoccales|g__Methylohalomonas"
+
+
+table(tax_genus_filtered$Genus)[table(tax_genus_filtered$Genus) > 1]
+tax_genus_filtered[tax_genus_filtered$Genus == "Taonella", 1:6]
+
+
+# Make phyloseq object - raw reads
+otu_table_phyloseq <- otu_table(as.matrix(com_genus_filtered), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_genus_filtered))
+
+ps <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps
+
+# saveRDS(ps, file = "phyloseq_object_genus_rawreads.rds")
+
+```
+Before filtering, there are `r nrow(com_genus)` families. After filtering families with a total abundance less than 3 and that occur in fewer than 3 samples, we got `r nrow(com_genus_filtered)` families.
+
+
+
+### CLR and relative abundance phyloseq at genus level
+
+```{r}
+
+# Option 1. CLR transformation
+# Robust CLR (rCLR): The rCLR transformation modifies the CLR approach by adding a small constant (often called a pseudocount) to the data before performing the log transformation, making it robust to zeros. This approach is especially useful in microbiome data where zeros are common in OTU tables.We performed a centered log-ratio (CLR) transformation of feature table, which has been added a small pseudocount, 10^-6. 
+otu_table <- as.data.frame(t(com_genus_filtered)) # samples in rows, species in columns
+
+# Add pseudocount to handle zeros
+pseudocount <- 1e-6
+otu_table <- otu_table + pseudocount
+
+# CLR Transformation
+com_genus_rclr <- t(apply(otu_table, 1, function(x) log(x) - mean(log(x))))
+com_genus_rclr <- as.data.frame(t(com_genus_rclr))
+com_genus_rclr[1:2, 1:2]
+
+# check if the sum of each sample approximate zero
+range(round(colSums(com_genus_rclr), 5))
+
+com_genus_rclr[1:2, 1:2]
+
+# Make phyloseq object - rclr
+otu_table_phyloseq <- otu_table(as.matrix(com_genus_rclr), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_genus_filtered))
+
+ps_rclr <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps_rclr
+
+# saveRDS(ps_rclr, file = "phyloseq_object_genus_rclr.rds")
+
+####################################
+# Option 2 CLR # based on https://www.youtube.com/watch?v=ulo7WatBEAo&ab_channel=RiffomonasProject
+# The CLR transformation does not replace zeros. Instead, only non-zero features are transformed, using the geometric mean of non-zero features as denominator.
+
+# geometric mean for only non-zero values
+gm <- function(x) {
+  exp(mean(log(x[x>0])))
+}
+
+
+# robust clr remove zeros
+com_genus_clr <- com_genus_filtered %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "genus") %>%
+  pivot_longer(-genus, values_to = "reads", names_to = "Sample") %>%
+  filter(reads != 0) %>%
+  group_by(Sample) %>%
+  mutate(rclr = log(reads/gm(reads))) %>%
+  ungroup() %>%
+  select(-reads) %>%
+  pivot_wider(names_from = "Sample", values_from = "rclr", values_fill = 0) %>% # if there are any NA values, we make them zeros
+  as.data.frame() %>%
+  column_to_rownames(var = "genus")
+
+com_genus_clr[1:2, 1:2]
+range(round(colSums(com_genus_clr), 5))
+
+# Make phyloseq object - clr
+otu_table_phyloseq <- otu_table(as.matrix(com_genus_clr), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_genus_filtered))
+
+ps_clr <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps_clr
+
+# saveRDS(ps_clr, file = "phyloseq_object_genus_clr.rds")
+
+# Relative abundance 
+com_genus_rel <- com_genus_filtered %>%
+  mutate(across(everything(), ~ .x / sum(.x)))
+
+# check if the sum of relative abundance per sample is 1 or not 
+range(colSums(com_genus_rel))
+com_genus_rel[1:2, 1:2]
+dim(com_genus_rel)
+
+# Make phyloseq object - relative abundance
+otu_table_phyloseq <- otu_table(as.matrix(com_genus_rel), taxa_are_rows = TRUE)
+sample_data_phyloseq <- sample_data(metadata)
+taxonomy_phyloseq <- tax_table(as.matrix(tax_genus_filtered))
+
+ps_ra <- phyloseq(otu_table_phyloseq, sample_data_phyloseq, taxonomy_phyloseq)
+ps_ra
+
+# saveRDS(ps_ra, file = "phyloseq_object_genus_ra.rds")
+
+```
+
+### Session Info
+```{r}
+sessionInfo()
+```
