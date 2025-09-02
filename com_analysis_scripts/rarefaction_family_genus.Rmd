@@ -1,0 +1,184 @@
+---
+title: "Rarefaction curves at family/genus level"
+author: "Jia Xiu (xibeihenai@gmail.com)"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+The raw reads data was come from the Coalescence experiment - Microbiome - 16S. 
+
+### Initiate libraries
+```{r load_packages_01, message=FALSE}
+
+rm(list=ls())
+
+library(vegan)
+library(tidyverse)
+library(phyloseq) 
+
+# Create the directory if it does not already exist
+folder_path <- "rarefaction_curves_family_genus/"
+
+if (!dir.exists(folder_path)) {
+  dir.create(folder_path, recursive = TRUE)
+}
+
+mytheme <- theme_light()+
+  theme(text = element_text(size = 10),
+        plot.title = element_text(size = 10),
+        legend.title = element_text(face = "bold", size = 10),
+        legend.text = element_text(size = 10), 
+        legend.justification = c("right", "top"),
+        legend.background = element_rect(),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size =  10, color = "black"),
+        axis.ticks = element_line(colour = "grey70", linewidth = 0.2),
+        panel.grid.major = element_line(colour = "grey70", linewidth = 0.1),
+        panel.grid.minor = element_blank())  
+```
+
+
+### Family level
+
+```{r}
+
+# read phyloseq object from all the samples - raw reads
+ps_rawreads_family <- readRDS("phyloseq_object_family_rawreads.rds")
+
+otu_table_all <- as.data.frame(otu_table(ps_rawreads_family)) 
+
+otu_table <- otu_table_all %>% 
+  select(!grep("Mock", names(otu_table_all)) & !grep("control", names(otu_table_all)) & !grep("FieldBlank", names(otu_table_all)) & !grep("f0_b0", names(otu_table_all))) %>% 
+  select(!c(IGAPark, MittelmoleWarnemunde, NeptunWerft, SABMarinaBramow, Stadthafen)) %>% 
+  rename(f100_b0_f_p0_r1 = Muhlendamm ,
+         f0_b100_b_p0_r1 = WarnemundeStrand)  %>%
+  filter(rowSums(across(everything())) != 0)
+
+otu_table <- as.data.frame(t(otu_table))
+otu_table[1:2, 1:2]
+
+# number of families x number of samples
+dim(otu_table)
+
+# summary of 240 samples (240 microcosm samples and two field samples)
+summary(rowSums(otu_table))
+
+# total number of reads from 240 samples
+sum(colSums(otu_table))
+
+S <- specnumber(otu_table) # observed number of species
+(raremax <- min(rowSums(otu_table)))
+
+# rarecurve(otu_table, step = 1000, sample = raremax, col = "blue", cex = 0.6)
+
+# prepare a rarefaction dataset for a better plot
+rarecurve_data <- rarecurve(otu_table, step = 1000)
+
+# extract metric from the output above (following Pat Schloss's Youtube tutorial)
+df_curves <- map_dfr(rarecurve_data, bind_rows) %>% 
+  bind_cols(Group = row.names(otu_table), .) %>% 
+  pivot_longer(-Group) %>% 
+  drop_na() %>% 
+  mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>% 
+  select(-name) %>% 
+  separate(Group, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_", remove = FALSE) %>%  
+  select(-replicate) %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("Freshwater", "Seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("0:100", "25:75", "50:50", "75:25", "100:0"))) %>% 
+  mutate(passage = factor(as.numeric(str_remove(passage, "^p")))) %>% 
+  filter(n_seqs < 40000)
+
+passage_colors <- c("0" = "#8c2d04", "1" = "#D9F0A3", "2" = "#ADDD8E", "3" = "#78C679", "4" = "#41ab5d", "5" = "#238443", "6" = "#005a32")
+
+(p <- ggplot(df_curves, aes(x = n_seqs, y = value, group = Group, colour = passage)) + 
+  geom_line( alpha = 0.7) +
+  facet_grid(mix ~ watertype) +
+  labs(x = "Sampling depth", y = "Number of observed families", title = "") + 
+    scale_color_manual(values = passage_colors, name = "Passage") +
+  # scale_x_continuous(expand = c(0, 0), breaks = c(1000, 2000, 3000, 4000, 5000, 7000, 8000, 9000, 10000)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  mytheme)
+p
+
+# ggsave(paste0(folder_path, "rarefaction_curve_family.pdf"), width = 6, height = 7, p)
+
+```
+
+
+### Genus level
+
+```{r}
+# read phyloseq object from all the samples
+ps_rawreads_genus <- readRDS("phyloseq_object_genus_rawreads.rds")
+
+otu_table_all <- as.data.frame(otu_table(ps_rawreads_genus)) 
+
+otu_table <- otu_table_all %>% 
+  select(!grep("Mock", names(otu_table_all)) & !grep("control", names(otu_table_all)) & !grep("FieldBlank", names(otu_table_all)) & !grep("f0_b0", names(otu_table_all))) %>% 
+  select(!c(IGAPark, MittelmoleWarnemunde, NeptunWerft, SABMarinaBramow, Stadthafen)) %>% 
+  rename(f100_b0_f_p0_r1 = Muhlendamm ,
+         f0_b100_b_p0_r1 = WarnemundeStrand)  %>%
+  filter(rowSums(across(everything())) != 0)
+
+otu_table <- as.data.frame(t(otu_table))
+otu_table[1:2, 1:2]
+
+# number of families x number of samples
+dim(otu_table)
+
+# summary of 240 samples (240 microcosm samples and two field samples)
+summary(rowSums(otu_table))
+
+# total number of reads from 240 samples
+sum(colSums(otu_table))
+
+S <- specnumber(otu_table) # observed number of species
+(raremax <- min(rowSums(otu_table)))
+
+# rarecurve(otu_table, step = 1000, sample = raremax, col = "blue", cex = 0.6)
+
+# prepare a rarefaction dataset for a better plot
+rarecurve_data <- rarecurve(otu_table, step = 1000)
+
+# extract metric from the output above (following Pat Schloss's Youtube tutorial)
+df_curves <- map_dfr(rarecurve_data, bind_rows) %>% 
+  bind_cols(Group = row.names(otu_table), .) %>% 
+  pivot_longer(-Group) %>% 
+  drop_na() %>% 
+  mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>% 
+  select(-name) %>% 
+  separate(Group, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_", remove = FALSE) %>%  
+  select(-replicate) %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("Freshwater", "Seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f0_b100", "f25_b75", "f50_b50", "f75_b25", "f100_b0"),  labels = c("0:100", "25:75", "50:50", "75:25", "100:0"))) %>% 
+  mutate(passage = factor(as.numeric(str_remove(passage, "^p")))) %>% 
+  filter(n_seqs < 40000)
+
+passage_colors <- c("0" = "#8c2d04", "1" = "#D9F0A3", "2" = "#ADDD8E", "3" = "#78C679", "4" = "#41ab5d", "5" = "#238443", "6" = "#005a32")
+
+(p <- ggplot(df_curves, aes(x = n_seqs, y = value, group = Group, colour = passage)) + 
+  geom_line( alpha = 0.7) +
+  facet_grid(mix ~ watertype) +
+  labs(x = "Sampling depth", y = "Number of observed genera", title = "") + 
+    scale_color_manual(values = passage_colors, name = "Passage") +
+  # scale_x_continuous(expand = c(0, 0), breaks = c(1000, 2000, 3000, 4000, 5000, 7000, 8000, 9000, 10000)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  mytheme)
+p
+
+# ggsave(paste0(folder_path, "rarefaction_curve_genera.pdf"), width = 6, height = 7, p)
+
+```
+
+
+### Session Info
+```{r}
+sessionInfo()
+```
+
+
+
