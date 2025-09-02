@@ -20,11 +20,14 @@ For table cleanning, check this script [feature_table_clean_MPA_family_genus.Rmd
 - Save table at family and genus level.
 - CLR transformation.
 - Combine "feature/OTU" table, taxonomy table, and metadata as phyloseq objects.
+> [!TIP]
+> To view intermediate data and outputs generated at each step of the analysis, please refer to the accompanying HTML files produced with R Markdown (download and open by your browser, e.g. Chrome).
 
 
 ### Rarefaction curves
 To check the sequencing depth, I generated rarefaction curves by `vegan` pacakge in R, see script [rarefaction_family_genus.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/rarefaction_family_genus.Rmd)
 
 
-> [!TIP]
-> To view intermediate data and outputs generated at each step of the analysis, please refer to the accompanying HTML files produced with R Markdown (download and open by your browser, e.g. Chrome).
+### Diversity analysis
+To analyse the community diveristy changes after coalescence, see script [rarefaction_family_genus.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/rarefaction_family_genus.Rmd)
+
