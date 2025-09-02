@@ -1,7 +1,7 @@
 # Pipeline to analyze raw reads of full length 16S RNA gene
 We got **14.29 M raw reads** of full length 16S RNA gene in pod5 files, which were generated from the FLO-MIN114 flowcell :dna: using the SQK-LSK114 kit.
 
-## Basecalling
+## 1. Basecalling
 I used [**Dorado (v0.9.1)**](https://github.com/nanoporetech/dorado/tree/release-v0.9) to do basecalling.
 We got 17M reads after basecalling by Dorado, with 4M “redundant” reads, which are so called "simplex have duplex offsprings". I used non_redundant.fastq.gz (12.9M reads) file for further demultiplexing test. \
 Xiu: Maybe I should do quality and sequence length control before demultiplexing.
@@ -22,10 +22,21 @@ source /vast/groups/VEO/tools/anaconda3/etc/profile.d/conda.sh && conda activate
 NanoPlot -t 2 --fastq results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq -o results_nanoplot/Dorado_0.9/all
 
 ```
+NanoStats
+```
+General summary:         
+Mean read length:                  1,535.2
+Mean read quality:                     9.6
+Median read length:                1,549.0
+Median read quality:                  14.3
+Number of reads:              14,565,365.0
+Read length N50:                   1,555.0
+STDEV read length:                 1,373.3
+Total bases:              22,361,283,770.0
+```
 
-
-## Demultiplexing
-### Barbell
+## 2. Demultiplexing
+### 2.1. Barbell
 We used [**barbell-sg-v0.1.5**](https://github.com/rickbeeloo/barbell) which is developed by **Rick Beloo** to demultiplex raw 16S reads. \
 From 14.56 M raw reads, we got **6,267,380 reads** assigned family taxonomic level.
 ```
@@ -94,10 +105,10 @@ $barbell trimm \
     -o $out_dir/trimmed_with_adapters_conctas
 ```
 
-### Rename demultiplexed fastq files
+### 2.2. Rename demultiplexed fastq files
 
 
-## Taxonomic assignment
+## 3. Taxonomic assignment
 ### Kraken2
 We assigned taxonomy to the raw reads by using [**Kraken2**](https://github.com/DerrickWood/kraken2/wiki/Manual). To report the output, I used Braken, a [customized python script](https://combine_kreports.py)  by jennifer.lu717@gmail.com. See here: https://github.com/jenniferlu717/Bracken?tab=readme-ov-file and https://ccb.jhu.edu/software/bracken/
 ```
