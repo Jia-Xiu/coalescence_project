@@ -1,0 +1,256 @@
+---
+title: "SpeSpeNet Network Visualization (results based on rawreads)"
+author: "Xiu Jia"
+date: "2025-06-17"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+Load libraries
+```{r, message = FALSE, warning = FALSE}
+
+# clean the work environment
+rm(list=ls())
+
+# Libraries
+library(tidyverse) 
+library(phyloseq)
+library(microbiome)
+library(tidygraph)
+library(ggraph)
+library(igraph)
+library(ComplexHeatmap)
+library(circlize)
+
+```
+
+
+## Only positive correlations
+```{r}
+# change work directory
+folder_path <- "network_SpeSpeNet_rawreads/correlation_positive_pseudo-counts_random/"
+
+# Create the directory if it does not already exist
+if (!dir.exists(folder_path)) {
+  dir.create(folder_path)
+}
+
+Correlation_matrix <- read.csv(paste0(folder_path, "Correlation_matrix_2025-06-17.txt"), header = TRUE, row.names = 1, check.names = FALSE)
+Correlation_matrix[1:5, 1:5]
+
+Edge_data <- read.table(paste0(folder_path, "Edge_data_2025-06-17.txt"), header = TRUE, row.names = 1, check.names = FALSE)
+head(Edge_data)
+
+Node_data <- read.table(paste0(folder_path, "Node_data_2025-06-17.txt"), sep = "\t", header = TRUE, quote = "", fill = TRUE) %>% 
+  select(-c(nodeSize, envcor, counts))
+head(Node_data)
+
+# read phyloseq object
+Tidygraph_object <- readRDS(paste0(folder_path, "Tidygraph_object_2025-06-17.rds"))
+Tidygraph_object
+
+# Remove modules (components) with only one node
+Tidygraph_filtered <- Tidygraph_object %>%
+  mutate(component = group_components()) %>%         # Assign component number
+  group_by(component) %>%
+  filter(n() > 1) %>%                                # Keep only components with >1 node
+  ungroup()
+
+# First, ensure `name` is in both
+Node_data$name <- as.character(Node_data$name)
+
+Tidygraph_filtered <- Tidygraph_filtered %>%
+  activate(nodes) %>%
+  left_join(Node_data, by = "name") %>% 
+  mutate(envcor = recode(envcor, 
+                         "f" = "Freshwater", 
+                         "b" = "Seawater")) %>%
+  mutate(envcor = factor(envcor, levels = c("Freshwater", "Seawater"))) %>% 
+   mutate(Family_label = paste0("italic('", Family, "')"))
+Tidygraph_filtered
+
+## add enrichment family as color 
+ALDEx2_path <- "Source_com._ALDEx2_fresh_sea_differential_analysis_family/"
+
+enrich_family_all <- read.csv(paste0(ALDEx2_path, "ALDEx2_results_all_passage.csv")) %>% 
+  dplyr::select(taxon, enrichment, significant) %>% 
+  filter(significant != "no_sig") %>% 
+  distinct(taxon, .keep_all = TRUE) %>% 
+  mutate(across(where(is.character), as.factor)) %>% 
+  select(-significant) %>% 
+  rename(Family = taxon)
+
+str(enrich_family_all)
+
+# 1. Extract node data
+node_df <- Tidygraph_filtered %>% 
+  activate(nodes) %>% 
+  as.data.frame()
+
+# 2. Join with enrichment data
+node_df <- left_join(node_df, enrich_family_all, by = "Family")
+
+# 3. Create label_color column
+node_df$label_color <- ifelse(
+  is.na(node_df$enrichment), "darkgray",
+  ifelse(node_df$enrichment == "Freshwater", "#0072B2", "#F8766D")
+)
+
+# 4. Add these back to Tidygraph object
+Tidygraph_filtered <- Tidygraph_filtered %>%
+  activate(nodes) %>%
+  mutate(label_color = node_df$label_color)
+
+
+# 5. Plot with Fruchterman-Reingold layout
+(p <- ggraph(Tidygraph_filtered, layout = "fr") +  # Fruchterman-Reingold layout
+  geom_edge_link(aes(width = weight, color = weight), alpha = 0.4, show.legend = TRUE) +  # Transparent and thinner edges
+  theme_void() +
+  scale_color_manual(values = c("Freshwater" = "#2166ac", "Seawater" = "#d6604d")) +  
+  scale_edge_color_gradient2(low = "#5ab4ac", mid = "#f5f5f5", high = "#d8b365", midpoint = 0) +
+  scale_edge_width(range = c(0.1, 1)) +  # Reduce line thickness range
+  geom_node_point(aes(size = nodeSize, color = envcor)) +
+  geom_node_text(aes(label = Family, color = I(label_color)), repel = TRUE, size = 3, show.legend = FALSE, max.overlaps = 15) + 
+  guides(edge_width = guide_legend(title = "Correlation"),
+         size = guide_legend(title = "Node size"),
+         color = guide_legend(title = "Maximum mean\nrelative abundance in:")))
+
+# ggsave(paste0(folder_path, "Network_correlation_positive_pseudo-counts_random_FR_layout_raw.png"), width = 8, height = 6, p)
+
+
+# 5. Plot with Circular linear layout 
+
+(p <- ggraph(Tidygraph_filtered, layout = "linear", circular = TRUE) +
+  geom_edge_arc(aes(width = weight, color = weight), alpha = 0.4, show.legend = TRUE) +
+  theme_void() +
+  scale_color_manual(values = c("Freshwater" = "#2166ac", "Seawater" = "#d6604d")) +
+  scale_edge_color_gradient2(low = "#5ab4ac", mid = "#f5f5f5", high = "#d8b365", midpoint = 0) +
+  scale_edge_width(range = c(0.1, 1)) +
+  geom_node_point(aes(size = nodeSize, color = envcor)) +
+  geom_node_text(aes(label = Family, color = I(label_color)), repel = TRUE, size = 3, show.legend = FALSE) +  #  The key here is I() (the "as-is" identity function) to prevent ggplot2 from treating them as aesthetic mappings.
+  guides(
+    edge_width = guide_legend(title = "Correlation"),
+    size = guide_legend(title = "Node size"),
+    color = guide_legend(title = "Maximum mean\nrelative abundance in:")
+  ))
+  
+# ggsave(paste0(folder_path, "Network_correlation_positive_pseudo-counts_random_circular_layout_raw.png"), width = 8, height = 6, p)
+
+
+######
+# ✅ 1. Average Node Degree per Module
+Tidygraph_filtered <- Tidygraph_filtered %>%
+  mutate(degree = centrality_degree())
+
+avg_degree_per_module <- Tidygraph_filtered %>%
+  as_tibble() %>%
+  group_by(component) %>%
+  summarise(avg_degree = mean(degree)) %>%
+  arrange(desc(avg_degree))
+avg_degree_per_module
+
+# ✅ 2. Modularity Score
+# Using Louvain clustering for community detection
+Tidygraph_filtered <- Tidygraph_filtered %>%
+  mutate(community = as.numeric(group_louvain()))
+
+igraph_obj <- as.igraph(Tidygraph_filtered)
+
+modularity_score <- modularity(igraph_obj, membership = V(igraph_obj)$community)
+modularity_score
+
+# ✅ 3. Dominant Phyla in Each Module
+dominant_phyla <- Tidygraph_filtered %>%
+  as_tibble() %>%
+  group_by(component, Phylum) %>%
+  summarise(n = n()) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  arrange(component)
+dominant_phyla 
+
+# ✅ To count how many edges belong to each module (component) in your Tidygraph_filtered objec
+Tidygraph_filtered %>%
+  activate(edges) %>%
+  mutate(
+    from_component = .N()$component[from],
+    to_component = .N()$component[to]
+  ) %>%
+  filter(from_component == to_component) %>%
+  as_tibble() %>%
+  count(module = from_component, name = "n_edges") %>%
+  arrange(desc(n_edges))
+
+# ✅ Code to Count Nodes per Module:
+Tidygraph_filtered %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  count(component, name = "n_nodes") %>%
+  arrange(desc(n_nodes))
+```
+
+### Check the original relative abundance in different watertype and edit the node size on the plot
+```{r}
+# read phyloseq object from all the samples - CLR transformed
+ps <- readRDS("phyloseq_object_family_rawreads_microcosm.rds")
+ps
+
+df <- as.data.frame(otu_table(ps)) %>% 
+  mutate(across(everything(), ~ .x * 100/ sum(.x))) 
+
+df <- as.data.frame(t(df)) %>% 
+  rownames_to_column(var = "name") %>% 
+  mutate( watertype = case_when(
+      grepl("_b_", name) ~ "Seawater",
+      grepl("_f_", name) ~ "Freshwater",
+      TRUE ~ NA_character_)) %>% 
+  column_to_rownames(var = "name") %>%
+  group_by(watertype) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>% 
+  column_to_rownames(var = "watertype") 
+
+df <- as.data.frame(t(df)) %>% 
+  mutate(abundant = pmax(Freshwater, Seawater, na.rm = TRUE))
+
+head(df)
+
+
+dim(df)
+
+
+# Extract node data (including Family names)
+node_data <- Tidygraph_filtered %>% as_tibble(active = "nodes")
+
+# Get unique families
+families <- unique(node_data$Family)
+
+# Subset your df by these families (assuming row names = Family names)
+df_subset <- df[rownames(df) %in% families, ]
+
+head(df_subset)
+
+summary(df_subset)
+
+# Node size 
+# the formula Bram used is:
+# meanSize <- sqrt(rowMeans(use_relab)) %>%
+# rescale(to = c(1,12))
+# So the max size of 12 is your max size, and the min size of 1 is your min size. And the scale is squared
+# so the value of 12 does not mean anything special, it's just scaled because those numbers look good for the circle sizes in ggplot2
+
+# 144-1 = a*(30.138391-0.002092)
+
+a = 30.138391/144
+a
+a*9 #3
+a*36 #6
+a*81 #9
+a*144 # 12
+
+```
+
+### Session Info
+```{r}
+sessionInfo()
+```
