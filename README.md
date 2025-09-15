@@ -27,9 +27,13 @@ For table cleanning, check this script [feature_table_clean_MPA_family_genus.Rmd
 ### Rarefaction curves
 To check the sequencing depth, I generated rarefaction curves by `vegan` pacakge in R, see script [rarefaction_family_genus.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/rarefaction_family_genus.Rmd)
 
+### Differential abundance analysis between freshwater and seawater source communities
+
+I used [ALDEx2](https://www.bioconductor.org/packages/release/bioc/vignettes/ALDEx2/inst/doc/ALDEx2_vignette.html) performed the differential abundance analysis between freshwater and seawater source communities, see script [ALDEx2_fresh_sea_source_com_differential_abundance_analysis_family.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/ALDEx2_fresh_sea_source_com_differential_abundance_analysis_family.Rmd)
+
 
 ### Diversity analysis
 To analyse the community diveristy changes after coalescence, see script [div_analysis_family_level_clr.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/div_analysis_family_level_clr_github_version.Rmd)
 
 ### Co-occurence network analysis
-Co-occurence network analysis was performed using [SpeSpeNet](https://utrecht-university.shinyapps.io/SpeSpeNet_v1/) with the following settings: Normalization: CLR, Correlation method: Spearman. I did further plotting in R with a Fruchterman–Reingold layout, you can find the script [here](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/Network_SpeSpeNet_rawreads.Rmd). 
+Co-occurence network analysis was performed using [SpeSpeNet](https://utrecht-university.shinyapps.io/SpeSpeNet_v1/) with the following settings: Normalization: CLR, Correlation method: Spearman.\n I did further plotting in R with a Fruchterman–Reingold layout, you can find the script [here](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/Network_SpeSpeNet_rawreads.Rmd). 
