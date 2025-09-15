@@ -31,3 +31,5 @@ To check the sequencing depth, I generated rarefaction curves by `vegan` pacakge
 ### Diversity analysis
 To analyse the community diveristy changes after coalescence, see script [rarefaction_family_genus.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/rarefaction_family_genus.Rmd)
 
+### Co-occurence network analysis
+Co-occurence network analysis was performed using [SpeSpeNet](https://utrecht-university.shinyapps.io/SpeSpeNet_v1/) with the following settings: Normalization: CLR, Correlation method: Spearman. I did further plotting in R, you can find the script here. 
