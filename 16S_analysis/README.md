@@ -181,3 +181,116 @@ Current available denoising approaches, such as DADA2, are inappropriate for Nan
 ## 4. Prepare reads for submission
 As we also cut and kept concatenated reads from Barbell for further analysis, some reads in FASTQs have duplicated indentifier. These reads cannot be accepted by NCBI or ENA. So I added extension to these duplicated reads.
 
+```
+import os
+import gzip
+import sys
+
+# --- Configuration ---
+# IMPORTANT: Update these paths to match your folder structure on your machine
+INPUT_DIR = "renamed_with_adapters_concats/"
+OUTPUT_DIR = "renamed_with_adapters_concats_header_updated/"
+
+
+def rename_duplicate_fastq_headers(input_path, output_path):
+    """
+    Reads a single FASTQ (or gzipped FASTQ) file, renames only the duplicate 
+    read headers using the _DUP_N convention, and writes the output.
+    """
+    
+    # Select the appropriate file opener function (handles .gz or plain files)
+    is_gzipped = input_path.endswith('.gz')
+    opener = gzip.open if is_gzipped else open
+    
+    read_id_counts = {}
+    reads_renamed = 0
+    total_reads = 0
+    
+    try:
+        # Open files using the determined opener function
+        with opener(input_path, 'rt') as infile, \
+             opener(output_path, 'wt') as outfile: 
+            
+            while True:
+                # 1: Header line (starts with '@')
+                header_line = infile.readline()
+                if not header_line:
+                    break # End of file
+
+                # 2-4: Read the rest of the FASTQ block
+                sequence_line = infile.readline()
+                quality_sep_line = infile.readline()
+                quality_line = infile.readline()
+                
+                if not (sequence_line and quality_sep_line and quality_line):
+                    break 
+
+                total_reads += 1
+                
+                # --- Read ID Extraction and Renaming Logic ---
+                
+                # Isolate the base read ID (everything after '@' up to the first space/tab/newline)
+                end_of_id = header_line.find(' ')
+                if end_of_id == -1:
+                    end_of_id = len(header_line.strip())
+                
+                original_id_full = header_line[:end_of_id] # e.g., @read_id
+                base_id = original_id_full[1:]              # e.g., read_id
+
+                # Track the count for this base ID
+                read_id_counts[base_id] = read_id_counts.get(base_id, 0) + 1
+                current_count = read_id_counts[base_id]
+                
+                new_header_line = header_line
+                
+                if current_count > 1:
+                    # This is a duplicate. Rename it.
+                    reads_renamed += 1
+                    
+                    # Calculate the duplicate index (1 for the first duplicate, 2 for the second, etc.)
+                    duplicate_index = current_count - 1 
+                    
+                    # Construct the new unique ID (e.g., ID_DUP_1)
+                    suffix = f"_DUP_{duplicate_index}"
+                    new_base_id_full = original_id_full + suffix
+                    
+                    # Replace the old base ID with the new one in the header line
+                    new_header_line = header_line.replace(original_id_full, new_base_id_full, 1)
+
+                # Write the modified block
+                outfile.write(new_header_line)
+                outfile.write(sequence_line)
+                outfile.write(quality_sep_line)
+                outfile.write(quality_line)
+        
+    except Exception as e:
+        print(f"ERROR: Failed to process {input_path}. Reason: {e}")
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return
+
+    print(f"-> FINISHED: {os.path.basename(input_path)} | Total reads: {total_reads} | Renamed: {reads_renamed}")
+
+
+# --- Main Execution Loop ---
+
+# 1. Ensure the output directory exists
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+print(f"Created/verified output directory: {OUTPUT_DIR}\n")
+
+# 2. Iterate over all files in the input directory
+print(f"Starting batch processing of files in: {INPUT_DIR}")
+for filename in os.listdir(INPUT_DIR):
+    # Process only FASTQ files (gzipped or not)
+    if filename.endswith(".fastq") or filename.endswith(".fastq.gz"):
+        input_path = os.path.join(INPUT_DIR, filename)
+        output_path = os.path.join(OUTPUT_DIR, filename)
+        
+        print(f"Processing {filename}...")
+        rename_duplicate_fastq_headers(input_path, output_path)
+
+print("\nBatch processing complete. The corrected files are in the 'files_header_updated/' folder.")
+```
+check one file that have been re-named successfully
+`cat TEcontrol_r2.fastq | awk '/^@.*_DUP_/{for(i=0;i<4;i++) {print; getline}}'
+
