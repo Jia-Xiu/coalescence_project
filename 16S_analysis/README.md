@@ -109,7 +109,13 @@ $barbell trimm \
 
 
 ## 3. Taxonomic assignment
-### Kraken2
+
+### 3.1 EMU
+We assigned taxonomy to the raw reads by using [**Emu**: species-level taxonomic abundance for full-length 16S reads](https://github.com/treangenlab/emu).
+
+* Curry, K.D., Wang, Q., Nute, M.G. et al. Emu: species-level microbial community profiling of full-length 16S rRNA Oxford Nanopore sequencing data. Nat Methods 19, 845–853 (2022). https://doi.org/10.1038/s41592-022-01520-4
+
+### 3.2 Kraken2
 We assigned taxonomy to the raw reads by using [**Kraken2**](https://github.com/DerrickWood/kraken2/wiki/Manual). To report the output, I used Braken, a [customized python script](https://combine_kreports.py)  by jennifer.lu717@gmail.com. See here: https://github.com/jenniferlu717/Bracken?tab=readme-ov-file and https://ccb.jhu.edu/software/bracken/
 ```
 #!/bin/bash
@@ -167,10 +173,11 @@ deactivate
 
 Now enjoy the downstream analysis :sparkles:
 
-## Other analysis attempt
+### 3.3 Other analysis attempt
 I also tried **QIIME2** platform for sequence analysis.\
 By using VSEARCH from QIIME2, I found majority reads are unique because the higher error rates of the reads. From 3.6M reads, only 4263 reads can be rereplicated (sea the table from the table.qzv file).\
 Current available denoising approaches, such as DADA2, are inappropriate for Nanopore long reads. Because current ONT data has too high an error rate for the DADA2 approach to be valid. DADA2 currently supports PacBio circular consensus sequencing but not nanopore reads (Callahan et al. 2019). Ref: https://github.com/benjjneb/dada2/issues/759 and https://github.com/benjjneb/dada2/issues/1364 
 
-
+## 4. Prepare reads for submission
+As we also cut and kept concatenated reads from Barbell for further analysis, some reads in FASTQs have duplicated indentifier. These reads cannot be accepted by NCBI or ENA. So I added extension to these duplicated reads.
 
