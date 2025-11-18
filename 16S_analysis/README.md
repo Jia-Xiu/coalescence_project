@@ -121,6 +121,52 @@ We assigned taxonomy to the raw reads by using [**Emu**: species-level taxonomic
 
 * Curry, K.D., Wang, Q., Nute, M.G. et al. Emu: species-level microbial community profiling of full-length 16S rRNA Oxford Nanopore sequencing data. Nat Methods 19, 845–853 (2022). https://doi.org/10.1038/s41592-022-01520-4
 
+run this code: `bash script_06_taxonomy_annotation_emu.sh`:
+```
+#!/bin/bash
+mkdir -p tmp/emu_taxonomy_annotation emu_out
+
+for fastq in results_barbell_sg/results_with_adapters/renamed_with_adapters_concats/*.fastq; do
+    sample=$(basename "$fastq" .fastq)
+    sbatch --job-name="$sample" sbatch_06_taxonomy_annotation_emu.sh "$fastq"
+done
+```
+
+sbatch_06_taxonomy_annotation_emu.sh:
+```
+#!/bin/bash
+#SBATCH --job-name=emu_anno_%x
+#SBATCH --partition=standard
+#SBATCH --output=tmp/emu_taxonomy_annotation/%x.%j.out
+#SBATCH --error=tmp/emu_taxonomy_annotation/%x.%j.err
+#SBATCH --mem=10G
+#SBATCH --cpus-per-task=10
+
+# Load emu in conda environment
+source /vast/groups/VEO/tools/miniconda3_2024/etc/profile.d/conda.sh 
+conda activate emu_v3.4.5 
+emu -h #database /veodata/03/databases/emu/v240807
+
+# Input file is passed as argument
+fastq_file_name=$1
+
+# Create output directory (unique per file)
+sample_name=$(basename "$fastq_file_name" .fastq)
+output_dir="emu_out"
+mkdir -p "$output_dir"
+
+emu abundance "$fastq_file_name" \
+        --db /veodata/03/databases/emu/v240807 \
+        --keep-counts \
+        --keep-read-assignments \
+        --threads 10 \
+        --output-dir  "$output_dir"
+
+emu combine-outputs emu_out/ species       
+
+exit
+```
+
 ### 3.2 Kraken2
 We assigned taxonomy to the raw reads by using [**Kraken2**](https://github.com/DerrickWood/kraken2/wiki/Manual). To report the output, I used Braken, a [customized python script](https://combine_kreports.py)  by jennifer.lu717@gmail.com. See here: https://github.com/jenniferlu717/Bracken?tab=readme-ov-file and https://ccb.jhu.edu/software/bracken/
 ```
