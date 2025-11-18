@@ -13,6 +13,12 @@ Xiu: Maybe I should do quality and sequence length control before demultiplexing
         ../raw_data_jena/240202_16S_amplicons_***/20240202_1646_MN41792_FAW73518_3914cd2c/pod5/ \
         -o results_dorado_0.9
 
+/.../dorado/v0.9.1/bin/dorado  basecaller --emit-fastq \
+        /.../dorado/v0.9.1/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0 \
+        --no-trim \
+        ../raw_data_jena/240202_16S_amplicons_Xiu/20240202_1646_MN41792_FAW73518_3914cd2c/pod5/ \
+        -o results_dorado_0.9_with_adpters
+
 gzip -c results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq.gz > results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq
 
 ## nanoplot
@@ -291,6 +297,6 @@ for filename in os.listdir(INPUT_DIR):
 
 print("\nBatch processing complete. The corrected files are in the 'files_header_updated/' folder.")
 ```
-check one file that have been re-named successfully
-`cat TEcontrol_r2.fastq | awk '/^@.*_DUP_/{for(i=0;i<4;i++) {print; getline}}'
+Check one file that have been re-named successfully
+`cat TEcontrol_r2.fastq | awk '/^@.*_DUP_/{for(i=0;i<4;i++) {print; getline}}`
 
