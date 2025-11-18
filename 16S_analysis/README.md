@@ -9,20 +9,23 @@ Xiu: Maybe I should do quality and sequence length control before demultiplexing
 ```
 /.../dorado/v0.9.1/bin/dorado  basecaller --emit-fastq \
         /.../dorado/v0.9.1/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0 \
-        --trim 'adapters' \
-        ../raw_data_jena/240202_16S_amplicons_***/20240202_1646_MN41792_FAW73518_3914cd2c/pod5/ \
-        -o results_dorado_0.9
-
-/.../dorado/v0.9.1/bin/dorado  basecaller --emit-fastq \
-        /.../dorado/v0.9.1/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0 \
         --no-trim \
         ../raw_data_jena/240202_16S_amplicons_Xiu/20240202_1646_MN41792_FAW73518_3914cd2c/pod5/ \
         -o results_dorado_0.9_with_adpters
 
-gzip -c results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq.gz > results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq
-
 ## nanoplot
 source /vast/groups/VEO/tools/anaconda3/etc/profile.d/conda.sh && conda activate nanoplot_v1.41.3
+
+NanoPlot -t 2 --fastq results_dorado_0.9_with_adpters/calls_2025-03-28_T19-44-13.fastq -o results_nanoplot/Dorado_0.9_with_adapter/all
+
+/.../dorado/v0.9.1/bin/dorado  basecaller --emit-fastq \
+        /.../dorado/v0.9.1/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0 \
+        --trim 'adapters' \
+        ../raw_data_jena/240202_16S_amplicons_***/20240202_1646_MN41792_FAW73518_3914cd2c/pod5/ \
+        -o results_dorado_0.9
+
+gzip -c results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq.gz > results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq
+
 
 # make nanoplot for all the samples
 NanoPlot -t 2 --fastq results_dorado_0.9/calls_2025-02-25_T15-31-26.fastq -o results_nanoplot/Dorado_0.9/all
