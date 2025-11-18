@@ -3,8 +3,6 @@ We got **14.29 M raw reads** of full length 16S RNA gene in pod5 files, which we
 
 ## 1. Basecalling
 I used [**Dorado (v0.9.1)**](https://github.com/nanoporetech/dorado/tree/release-v0.9) to do basecalling.
-We got 17M reads after basecalling by Dorado, with 4M “redundant” reads, which are so called "simplex have duplex offsprings". I used non_redundant.fastq.gz (12.9M reads) file for further demultiplexing test. \
-Xiu: Maybe I should do quality and sequence length control before demultiplexing.
 
 ```
 /.../dorado/v0.9.1/bin/dorado  basecaller --emit-fastq \
@@ -115,7 +113,7 @@ $barbell trimm \
 ```
 
 ### 2.2. Rename demultiplexed fastq files
-
+I renamed the barbell output by this [script](https://github.com/Jia-Xiu/coalescence_project/blob/main/16S_analysis/script_05_rename_fastq_by_metadata_with_adapters_concats.sh), according to the list of barcodes[16S_mixing_exp._sample_list_30-04-2025.csv](https://github.com/Jia-Xiu/coalescence_project/blob/main/16S_analysis/16S_mixing_exp._sample_list_30-04-2025.csv)
 
 ## 3. Taxonomic assignment
 
