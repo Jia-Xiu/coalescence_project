@@ -12,7 +12,7 @@ I used [**Dorado (v0.9.1)**](https://github.com/nanoporetech/dorado/tree/release
         -o results_dorado_0.9_with_adpters
 
 ## nanoplot
-source /vast/groups/VEO/tools/anaconda3/etc/profile.d/conda.sh && conda activate nanoplot_v1.41.3
+source /.../tools/anaconda3/etc/profile.d/conda.sh && conda activate nanoplot_v1.41.3
 
 NanoPlot -t 2 --fastq results_dorado_0.9_with_adpters/calls_2025-03-28_T19-44-13.fastq -o results_nanoplot/Dorado_0.9_with_adapter/all
 
@@ -113,7 +113,7 @@ $barbell trimm \
 ```
 
 ### 2.2. Rename demultiplexed fastq files
-I renamed the barbell output by this [script](https://github.com/Jia-Xiu/coalescence_project/blob/main/16S_analysis/script_05_rename_fastq_by_metadata_with_adapters_concats.sh), according to the list of barcodes[16S_mixing_exp._sample_list_30-04-2025.csv](https://github.com/Jia-Xiu/coalescence_project/blob/main/16S_analysis/16S_mixing_exp._sample_list_30-04-2025.csv)
+I renamed the barbell output by this [script](https://github.com/Jia-Xiu/coalescence_project/blob/main/16S_analysis/script_05_rename_fastq_by_metadata_with_adapters_concats.sh), according to the list of barcodes [16S_mixing_exp._sample_list_30-04-2025.csv](https://github.com/Jia-Xiu/coalescence_project/blob/main/16S_analysis/16S_mixing_exp._sample_list_30-04-2025.csv)
 
 ## 3. Taxonomic assignment
 
