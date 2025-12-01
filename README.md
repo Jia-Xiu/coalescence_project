@@ -35,5 +35,8 @@ I used [ALDEx2](https://www.bioconductor.org/packages/release/bioc/vignettes/ALD
 ### Diversity analysis
 To analyse the community diveristy changes after coalescence, see script [div_analysis_species_level_rclr.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/div_analysis_species_level_rclr.Rmd)
 
+### Sloan's neutral model
+We fit the Sloan's neutral model to communities grown in freshwater and seawater seperately, see [Sloan_model_all_fresh_sea_species.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/Sloan_model_all_fresh_sea_species.Rmd).
+
 ### Co-occurence network analysis
 Co-occurence network analysis was performed using [SpeSpeNet](https://utrecht-university.shinyapps.io/SpeSpeNet_v1/) with the following settings: Normalization: CLR, Correlation method: Spearman.\n I did further plotting in R with a Fruchterman–Reingold layout, you can find the script [here](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/Network_SpeSpeNet_rawreads.Rmd). 
