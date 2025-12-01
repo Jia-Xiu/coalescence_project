@@ -13,13 +13,11 @@ Please click here for scripts regarding [**raw reads processing**](https://githu
 
 
 ## Downstream community analysis
-### Table cleaning
-For table cleanning, check this script [feature_table_phyloseq_preparation.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/feature_table_phyloseq_preparation.Rmd), which includes
-- Filter-out non bacteria reads.
-- Removing taxa with a total reads less than 3 and that occur in fewer than 3 samples.
-- Save table at family and genus level.
-- CLR transformation.
-- Combine "species/OTU" table, taxonomy table, and metadata as phyloseq objects.
+### Combine species table, taxonomic information and metadata as pyloseq object
+Check this script [feature_table_phyloseq_preparation.Rmd](https://github.com/Jia-Xiu/coalescence_project/blob/main/com_analysis_scripts/feature_table_phyloseq_preparation.Rmd), which includes combine "species/OTU" table, taxonomy table, and metadata as phyloseq objects including the OUT_table in:
+- raw reads
+- CLR transformation
+- relative abundance
 > [!TIP]
 > To view intermediate data and outputs generated at each step of the analysis, please refer to the accompanying HTML files produced with R Markdown (download and open by your browser, e.g. Chrome).
 
