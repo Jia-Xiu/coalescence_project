@@ -1,0 +1,632 @@
+---
+title: "Differential abundance analysis between freshwater and seawater at species level (ALDEx2)"
+author: "Jia Xiu (xibeihenai@gmail.com)"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+The is a script to generate **Fig. 3.** Freshwater and seawater preferred species under laboratory conditions.
+
+### Initiate libraries
+```{r load_packages_01, message=FALSE}
+
+rm(list=ls())
+
+library(tidyverse)
+library(ALDEx2)
+library(phyloseq) 
+library(microbiome)
+library(ggvenn)
+library(RColorBrewer)
+# display.brewer.all()
+library(ggrepel)
+
+
+# change the working path
+folder_path <- "ALDEx2_differential_analysis_source_coms_species/"
+
+# Create the directory if it does not already exist
+if (!dir.exists(folder_path)) {
+  dir.create(folder_path)
+}
+
+mytheme <- theme_light()+
+  theme(text = element_text(size = 10),
+        legend.title = element_text(face = "bold", size = 10),
+        legend.text = element_text(size = 10), 
+        legend.justification = c("right", "top"),
+        legend.background = element_rect(),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 10, color = "black"),
+        axis.ticks = element_line(colour = "grey70", linewidth = 0.2),
+        panel.grid.major = element_line(colour = "grey70", linewidth = 0.1),
+        panel.grid.minor = element_blank())  
+
+```
+
+### Load raw feature table from the pyloseq object
+Load feature table
+```{r}
+
+ps_rawreads <- readRDS("phyloseq_object_species_rawreads.rds")
+
+# only keep the regional communities (100%) in their original samples
+pattern <- "f0_b100_b|f100_b0_f|WarnemundeStrand|Muhlendamm"
+
+# Subset the phyloseq object using the pattern
+otu_table_native_com_ps <- subset_samples(ps_rawreads, 
+                                          sample_names(ps_rawreads) %in% grep(pattern, sample_names(ps_rawreads), value = TRUE))
+
+
+otu_table_native_com <- as.data.frame(otu_table(otu_table_native_com_ps)) %>% 
+  filter(rowSums(across(where(is.numeric))) > 0)
+
+dim(otu_table_native_com)
+
+rownames(otu_table_native_com)[grep("Clade I", rownames(otu_table_native_com))]
+
+### keeping only the species name (removing everything before and including "f__"), but preserving the order name when the species is "uncultured"
+
+# make col.names shorter
+row.names(otu_table_native_com) <- sub(".*(o__)", "\\", row.names(otu_table_native_com))
+
+# Original row names
+rows <- row.names(otu_table_native_com)
+
+# Cleaned names
+cleaned_names <- ifelse(
+  grepl("f__uncultured", rows),
+  # If species is 'uncultured', keep order + '__uncultured'
+  sub("^(.*?)\\|f__", "\\1__", rows),
+  # Otherwise, keep just the species name
+  sub(".*\\|f__", "", rows)
+)
+
+# Update row names
+row.names(otu_table_native_com) <- cleaned_names
+otu_table_native_com[1:3, 1:3]
+
+
+# number of species x number of samples 
+dim(otu_table_native_com)
+# summary of species
+summary(rowSums(otu_table_native_com))
+# total number of reads from 240 samples
+sum(colSums(otu_table_native_com))
+
+
+# only native communities in lab conditions
+otu_table <- otu_table_native_com %>% 
+  dplyr::select(all_of(grep("f0_b100_b|f100_b0_f", colnames(.), value = TRUE))) %>% 
+  filter(rowSums(across(where(is.numeric))) > 0)
+dim(otu_table)
+
+metadata_native_com <- as.data.frame(meta(otu_table_native_com_ps)) 
+metadata_native_com <- metadata_native_com[, c("watertype", "passage")]
+
+metadata_native_com <- metadata_native_com %>% 
+  filter(rownames(.) %in% grep("f0_b100_b|f100_b0_f", rownames(.), value = TRUE)) 
+
+dim(metadata_native_com)
+
+```
+
+### 1. Each Passage - ALDEx2 differential abundance analysis for the fresh and sea water communities 
+https://www.bioconductor.org/packages/release/bioc/vignettes/ALDEx2/inst/doc/ALDEx2_vignette.html
+It is important to note that ALDEx uses Bayesians sampling from a Dirichlet distribution to estimate the underlying technical variation.\n
+
+#### Correcting for asymmetric datasets
+ALDEx2 now includes methods to centre the data properly when the dataset contains anasymmetry between the groups. Anasymmetry can arise for many reasons: in 16S rRNA gene sequencing, it canarise when the samples in the two groups are taken from different environments.The asymmetry can manifest either as a difference in sparsity(i.e.,one group contains more 0 value features than the other) or as asystematic difference in abundance. When this occurs the geometric mean of each group can be markedly different, and thus an inherent skew in the dataset can occur that leads to false positive and false negative feature calls.
+
+```{r warning=FALSE}
+
+# Initialize an empty list to store results
+all_results <- list()
+
+# Loop through each time point (passage)
+for (time in unique(metadata_native_com$passage)) {
+  # Subset data for the current time point
+  current_samples <- rownames(metadata_native_com[metadata_native_com$passage == time, ])
+  current_otu_table <- otu_table[, current_samples]
+  current_watertype <- metadata_native_com[metadata_native_com$passage == time, "watertype"]
+  
+  # Perform ALDEx2 analysis
+  aldex_res <- aldex.clr(current_otu_table, current_watertype, mc.samples = 1000, denom = "all")
+  # We recommend 128 or more mc.samples for the t-test, 1000 for a rigorous effect size calculation, and at least 16 for ANOVA.
+  # An any variable (all, iqlr, zero, lvha, median, user) indicating features to use as the denominator for the Geometric Mean calculation.
+  # The default "all" uses the geometric mean abundance of all features.
+  # Using "iqlr" uses the features that are between the first and third quartile of the variance of the clr values across all samples. 
+  
+  
+  # Perform differential testing
+  aldex_ttest <- aldex.ttest(aldex_res)
+  
+  # the user can perform the glm and Kruskal Wallace tests for one-way ANOVA of two or more conditions
+  # aldex_glm <- aldex.glm(aldex_res, current_watertype)
+  
+  # Calculate effect sizes
+  aldex_effect <- aldex.effect(aldex_res)
+  
+  # Combine differential testing and effect sizes
+  combined <- data.frame(aldex_ttest, aldex_effect)
+  
+  # Add taxon names and time point
+  combined$taxon <- rownames(combined)
+  combined$time_point <- time
+  
+  # Store in the list
+  all_results[[time]] <- combined
+}
+
+# Combine all taxa into a single data frame and check how it looks like
+final_results <- do.call(rbind, all_results)
+head(final_results)
+
+```
+- we.ep - Expected P value of Welch’s t test 
+- we.eBH - Expected Benjamini-Hochberg corrected P value of Welch’s t test 
+- wi.ep - Expected P value of Wilcoxon rank test 
+- wi.eBH - Expected Benjamini-Hochberg corrected P value of Wilcoxon test
+- rab.all - median clr value for all samples in the feature 
+- rab.win.b - median clr value for the brackish/seawater group of samples 
+- rab.win.f - median clr value for the freshwater group of samples 
+- rab.X1 BNS.q50 - median expression value of features in sample X1 BNS if [include.item.summary=TRUE] 
+- dif.btw - median difference in clr values between freshwater and brackish/seawater groups 
+- dif.win - median of the largest difference in clr values within freshwater and brackish/seawater groups 
+- effect - median effect size: diff.btw / max(dif.win) for all instances 
+- overlap - proportion of effect size that overlaps 0 (i.e. no effect)
+
+
+#### built-in aldex.plot
+
+```{r}
+# defalt plot by built-in aldex.plot
+par(mfrow=c(1,3))
+aldex.plot(final_results, type="MA", test="welch", xlab="Log-ratio abundance",
+           ylab="Difference", main='Bland-Altman plot')
+aldex.plot(final_results, type="MW", test="welch", xlab="Dispersion",
+           ylab="Difference", main='Effect plot')
+aldex.plot(final_results, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+
+# The MA plot helps check for an abundance-dependent bias in the differential abundance call. The MW plot is a more robust display specific to ALDEx2 that incorporates the variation of the CLR values. X-axis (rab.all): Measures the Average Abundance ($\text{A}$) of the feature across all samples. (rab.all) is the median value of the CLR transformed counts for the feature across all samples (often referred to as Log-ratio abundance).
+
+# The left panel is an Bland-Altman or MA plot that shows the relationship between (relative) Abundance and Difference. # MA, Effect and Volcano plots of ALDEx2 output. Measures the Effect Size (Difference in median CLR abundances between the groups).
+
+# The middle panel is an effect plot that shows the relationship between Difference and Dispersion; the lines are equal difference and dispersion. X-axis (diff.win): Median maximum difference of CLR values within each feature, a measure of within-feature variability. Y-axis (effect): The CLR effect size (median difference between groups), a measure of between-feature difference.
+
+# The right hand plot is a volcano plot; the lines represent a posterior predictive p-value of 0.001 and 1.5 fold difference. In all plots features that are Not significant are in grey or black. Features that are statistically significant are in red. The log-ratio abundance axis is the clr value for the feature.
+
+dev.off()
+
+```
+
+
+
+#### volcano plot
+```{r}
+# ALDEx2nowincorporatesfourapproachestodealwithasymmetricdatasets: (1/4) zero: This approach identifies those features that are non-zero in each group. In this approach the per-group non-zero features are used aldex.clr calculates the geometric mean in the clr transformation. This method is appropriate when the groups are very asymmetric, but the experimentalist must ask whether the comparison is valid in these extreme cases.
+
+# Add a categorization column for significance and enrichment
+# both Welch and Wilcoxon rank test significant
+final_results$significant <- ifelse(
+  final_results$we.eBH < 0.05 | final_results$wi.eBH < 0.05 , "sig", "no_sig")
+
+final_results$enrichment <- ifelse(
+  final_results$significant == "sig" & final_results$diff.btw > 0, "Freshwater",
+  ifelse(final_results$significant == "sig" & final_results$diff.btw < 0, "Seawater", "Not significant")
+)
+
+final_results <- final_results %>% 
+  mutate(enrichment = factor(enrichment, levels = c("Freshwater", "Seawater", "Not significant"))) %>% 
+  mutate(time_point = factor(as.numeric(str_remove(time_point, "^p"))))
+
+tail(final_results)
+
+# write.csv(final_results, paste0(folder_path, "ALDEx2_results_per_passage.csv"))
+
+
+# Volcano plot with faceting and labels for significant taxa
+(volcano_plot <- ggplot(final_results, aes(x = diff.btw, y = -log10(we.eBH), color = enrichment)) +
+    geom_point(aes(color = enrichment), size = 2, alpha = 0.7) +
+    scale_color_manual(values = c("Freshwater" = "#0073C2FF", 
+                                  "Seawater" = "#CD534CFF", 
+                                  "Not significant" = "gray")) +
+    labs(title = "",
+         x = "Difference between freshwater and seawater",
+         y = "-log10(adjusted p-value)",
+         color = "Significance") +
+    # Add faceting by time point
+    facet_wrap(~time_point, nrow = 3) +
+    # Add labels for significant taxa 
+    # Add labels for significant taxa 
+    geom_text_repel(
+      data = subset(final_results, enrichment != "Not significant"),
+      aes(label = taxon),
+      size = 2.5,  # adjust text size if needed
+      max.overlaps = 20,  # control overlap
+      fontface = "bold.italic",
+      box.padding = 0.1,
+      point.padding = 0.1,
+      alpha = 0.9,
+      segment.size = 0.2,           # thinner connecting line
+      segment.alpha = 0.4) +
+    mytheme)  
+
+# ggsave(paste0(folder_path, "Fig_S8_volcano_plot_distinct_species_in_fresh_sea_water_with_passages.pdf"), volcano_plot, width = 10, height = 12)
+# 
+# ggsave(paste0(folder_path, "Fig_S8_volcano_plot_distinct_species_in_fresh_sea_water_with_passages.png"), volcano_plot, width = 10, height = 12)
+
+# Print f_enriched taxa
+f_enriched_taxa <- final_results[final_results$enrichment == "Freshwater", ]
+cat("f_enriched taxa are:\n", row.names(f_enriched_taxa))
+
+# Print b_enriched taxa
+b_enriched_taxa <- final_results[final_results$enrichment == "Seawater", ]
+cat("b_enriched taxa are: \n", row.names(b_enriched_taxa))
+
+```
+
+
+
+### 2. All passage combined - ALDEx2 differential abundance analysis for the fresh and sea water communities 
+
+```{r warning=FALSE}
+
+current_otu_table <- otu_table
+current_watertype <- metadata_native_com$watertype
+
+# Perform ALDEx2 analysis
+aldex_res <- aldex.clr(otu_table, current_watertype, mc.samples = 1000, denom = "all")
+# We recommend 128 or more mc.samples for the t-test, 1000 for a rigorous effect size calculation, and at least 16 for ANOVA.
+# An any variable (all, iqlr, zero, lvha, median, user) indicating features to use as the denominator for the Geometric Mean calculation.
+# The default "all" uses the geometric mean abundance of all features.
+# Using "iqlr" uses the features that are between the first and third quartile of the variance of the clr values across all samples. 
+
+
+# Perform differential testing
+aldex_ttest <- aldex.ttest(aldex_res)
+
+# the user can perform the glm and Kruskal Wallace tests for one-way ANOVA of two or more conditions
+# aldex_glm <- aldex.glm(aldex_res, current_watertype)
+
+# Calculate effect sizes
+aldex_effect <- aldex.effect(aldex_res)
+
+# Combine differential testing and effect sizes
+combined <- data.frame(aldex_ttest, aldex_effect)
+
+# Add taxon names and time point
+combined$taxon <- rownames(combined)
+
+# Combine all taxa into a single data frame and check how it looks like
+final_results <- combined
+head(final_results)
+
+```
+- we.ep - Expected P value of Welch’s t test 
+- we.eBH - Expected Benjamini-Hochberg corrected P value of Welch’s t test 
+- wi.ep - Expected P value of Wilcoxon rank test 
+- wi.eBH - Expected Benjamini-Hochberg corrected P value of Wilcoxon test
+- rab.all - median clr value for all samples in the feature 
+- rab.win.b - median clr value for the brackish/seawater group of samples 
+- rab.win.f - median clr value for the freshwater group of samples 
+- rab.X1 BNS.q50 - median expression value of features in sample X1 BNS if [include.item.summary=TRUE] 
+- dif.btw - median difference in clr values between freshwater and brackish/seawater groups 
+- dif.win - median of the largest difference in clr values within freshwater and brackish/seawater groups 
+- effect - median effect size: diff.btw / max(dif.win) for all instances 
+- overlap - proportion of effect size that overlaps 0 (i.e. no effect)
+
+
+#### built-in aldex.plot
+
+```{r}
+
+# defalt plot by built-in aldex.plot
+par(mfrow=c(1,3))
+aldex.plot(final_results, type="MA", test="welch", xlab="Log-ratio abundance",
+           ylab="Difference", main='Bland-Altman plot')
+aldex.plot(final_results, type="MW", test="welch", xlab="Dispersion",
+           ylab="Difference", main='Effect plot')
+aldex.plot(final_results, type="volcano", test="welch", xlab="Difference",
+           ylab="-1(log10(q))", main='Volcano plot') 
+# The left panel is an Bland-Altman or MA plot that shows the relationship between (relative) Abundance and Difference. The middle panel is an effect plot that shows the relationship between Difference and Dispersion; the lines are equal difference and dispersion. The right hand plot is a volcano plot; the lines represent a posterior predictive p-value of 0.001 and 1.5 fold difference. In all plots features that are Not significant are in grey or black. Features that are statistically significant are in red. The log-ratio abundance axis is the clr value for the feature.
+dev.off()
+
+```
+
+
+#### volcano plot & MA_plot
+```{r}
+# ALDEx2 now incorporates four approaches to deal with asymmetric datasets: 
+# (1/4) zero: This approach identifies those features that are non-zero in each group. In this approach the per-group non-zero features are used aldex.clr calculates the geometric mean in the clr transformation. This method is appropriate when the groups are very asymmetric, but the experimentalist must ask whether the comparison is valid in these extreme cases.
+
+# Add a categorization column for significance and enrichment
+# only Wilcoxon rank test significant
+final_results$significant <- ifelse(
+  final_results$wi.eBH < 0.05, "sig", "no_sig") # final_results$we.eBH < 0.05 & 
+
+final_results$enrichment <- ifelse(
+  final_results$significant == "sig" & final_results$diff.btw > 0, "Freshwater",
+  ifelse(final_results$significant == "sig" & final_results$diff.btw < 0, "Seawater", "Not significant")
+)
+
+final_results <- final_results %>% 
+  mutate(enrichment = factor(enrichment, levels = c("Freshwater", "Seawater", "Not significant")))
+
+final_results$text_label <- ifelse(
+  final_results$rab.all > 2.5 & final_results$significant == "sig", "add_text", "dont_add")
+
+tail(final_results)
+
+# write.csv(final_results, paste0(folder_path, "ALDEx2_results_all_passage.csv"))
+
+
+# Volcano plot with faceting and labels for significant taxa
+(volcano_plot <- ggplot(final_results, aes(x = diff.btw, y = -log10(wi.eBH), color = enrichment)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dotted", color = "red", show.legend = TRUE) +
+    geom_point(size = 3, alpha = 0.7) +
+    scale_color_manual(values = c("Freshwater" = "#0073C2FF", 
+                                  "Seawater" = "#CD534CFF", 
+                                  "Not significant" = "darkgray")) +
+    labs(title = "",
+         x = "Median of CLR differences \nbetween freshwater and seawater",
+         y = expression(-log[10]("Adjusted P-value")),
+         color = "Preference") +
+    # Add labels for significant taxa 
+    geom_text_repel(
+      data = subset(final_results, enrichment != "Not significant"),
+      aes(label = taxon),
+      size = 3,  
+      max.overlaps = 30,  # control overlap
+      fontface = "italic",
+      box.padding = 0.1,
+      point.padding = 0.1,
+      segment.size = 0.2,           # thinner connecting line
+      segment.alpha = 0.4) +
+    
+    mytheme +
+    # theme(legend.position=c(0.8, 0.9)) +
+    theme(legend.background = element_rect(colour = 'darkgray', fill = 'white', linewidth = 0.1)))  
+
+
+# ggsave(paste0(folder_path, "volcano_plot_distinct_species_in_fresh_sea_water_all_wilcoxon_raw.pdf"),  volcano_plot, width = 9, height = 7)
+# ggsave(paste0(folder_path, "volcano_plot_distinct_species_in_fresh_sea_water_all_wilcoxon_raw.png"),  volcano_plot, width = 9, height = 7)
+
+# Bland–Altman-style (MA) plot — it shows the average log-ratio abundance on the x-axis and the difference (effect size or log-ratio difference) on the y-axis.
+
+(MA_plot <- ggplot(final_results, aes(x = diff.btw, y = rab.all, color = enrichment)) +
+    geom_point(size = 2.5, alpha = 0.7) +
+    scale_color_manual(values = c("Freshwater" = "#0073C2FF", 
+                                  "Seawater" = "#CD534CFF", 
+                                  "Not significant" = "darkgray")) +
+    labs(title = "", 
+         x = "Median of CLR differences \nbetween freshwater and seawater", 
+         y = "Log-ratio abundance",  
+         color = "Preference") +
+    geom_text_repel(
+      data = subset(final_results, text_label != "dont_add"),
+      aes(label = taxon),
+      size = 3,  # adjust text size if needed
+      max.overlaps = 32,  # control overlap
+      fontface = "italic",
+      box.padding = 0.1,
+      point.padding = 0.1,
+      segment.size = 0.2,           # thinner connecting line
+      segment.alpha = 0.4) +
+    mytheme +
+    # theme(legend.position=c(0.9, 0.6)) +
+    theme(legend.background = element_rect(colour = 'darkgray', fill = 'white', linewidth = 0.1)))  
+
+# ggsave(paste0(folder_path, "Fig_3A_MA_plot_distinct_species_in_fresh_sea_water_all_wilcoxon_raw.pdf"), MA_plot, width = 5, height = 3.5)
+# ggsave(paste0(folder_path, "Fig_3A_MA_plot_distinct_species_in_fresh_sea_water_all_wilcoxon_raw.png"), MA_plot, width = 5, height = 3.5)
+
+(MW_plot <- ggplot(final_results, aes(x = diff.win, y = diff.btw, color = enrichment)) +
+    geom_point(size = 2.5, alpha = 0.7) +
+    scale_color_manual(values = c("Freshwater" = "#0073C2FF", 
+                                  "Seawater" = "#CD534CFF", 
+                                  "Not significant" = "darkgray")) +
+    labs(title = "", 
+         x = "Dispersion", 
+         y = "Effect size", #\n(Median of CLR differences between freshwater and seawater),  
+         color = "Preference") +
+    geom_text_repel(
+      data = subset(final_results, text_label != "dont_add"),
+      # data = subset(final_results, enrichment != "Not significant"),
+      aes(label = taxon),
+      size = 2.5, 
+      max.overlaps = 32, 
+      fontface = "italic",
+      box.padding = 0.1,
+      point.padding = 0.1,
+      segment.size = 0.2,      
+      segment.alpha = 0.4) +
+    mytheme +
+    # theme(legend.position=c(0.9, 0.6)) +
+    theme(legend.background = element_rect(colour = 'darkgray', fill = 'white', linewidth = 0.1)))  
+
+# ggsave(paste0(folder_path, "MW_plot_distinct_species_in_fresh_sea_water_all_wilcoxon_raw.pdf"),  MW_plot, width = 5, height = 3.5)
+# ggsave(paste0(folder_path, "MW_plot_distinct_species_in_fresh_sea_water_all_wilcoxon_raw.png"),  MW_plot, width = 5, height = 3.5)
+
+# Print freshwater enriched taxa
+final_results[final_results$enrichment == "Freshwater", ] %>% dplyr::select(diff.win) %>% arrange(desc(diff.win))
+
+
+# Print seawater enriched taxa
+final_results[final_results$enrichment == "Seawater", ] %>% dplyr::select(diff.win) %>% arrange(desc(diff.win))
+
+
+```
+
+### Summarize the enriched taxa
+
+```{r}
+
+# Statistical Summary & Enrichment Counts
+(total_species <- nrow(final_results))
+significant_count <- sum(final_results$significant == 'sig')
+enrichment_counts <- final_results %>%
+  count(enrichment, name = "Count")
+head(enrichment_counts)
+
+# Add Taxonomy (Genus) via string splitting
+# Assumes 'Species' column is in "Genus species_name" format
+final_results_taxa <- final_results %>%
+  mutate(Genus = str_split_fixed(taxon, " ", 2)[, 1])
+
+# Summarize Taxa Counts (Genus Level)
+genus_summary <- final_results_taxa %>%
+  group_by(Genus, enrichment) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  arrange(enrichment, desc(Count)) %>% 
+  as.data.frame()
+
+genus_summary
+
+# Enrichment Bar Chart (Total counts)
+(p1 <- ggplot(enrichment_counts, aes(x = reorder(enrichment, -Count), y = Count, fill = enrichment)) +
+    geom_col() +
+    geom_text(aes(label = Count), vjust = -0.5, size = 4) +
+    scale_fill_manual(values = c("Freshwater" = "#0073C2FF", 
+                                 "Seawater" = "#CD534CFF", 
+                                 "Not significant" = "darkgray")) +
+    labs(
+      title = "Total Significant Species Enriched by Group",
+      x = "Enrichment Group",
+      y = "Number of Species"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none"))
+
+# Calculate the total count per Genus across both groups
+genus_total_counts <- genus_summary %>%
+  group_by(Genus) %>%
+  summarise(Total_Count = sum(Count), .groups = 'drop') %>%
+  arrange(desc(Total_Count))
+
+# Factor the Genus column based on descending Total_Count for proper plot ordering
+genus_enriched <- genus_summary %>%
+  mutate(Genus = factor(Genus, levels = genus_total_counts$Genus))
+
+# Plot the total number of species for each genus and enrichment group. All Enriched Genera Sorted by Total Species Count (Freshwater vs. Seawater
+(p2 <- ggplot(genus_enriched, aes(x = Genus, y = Count, fill = enrichment)) +
+    geom_col(position = "stack") +
+    geom_text( aes(label = Count), position = position_stack(vjust = 0.5), color = "black", size = 3) +
+    scale_fill_manual(values = c("Freshwater" = "#0073C2FF",
+                                 "Seawater" = "#CD534CFF",
+                                 "Not significant" = "lightgray")) +
+    labs(title = "",
+         x = "Genus (Sorted by Total Species Count)",
+         y = "Number of Species",
+         fill = "Preference") +
+    scale_y_continuous(expand = c(0, 0)) +
+    mytheme +
+    theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 10)))
+
+# ggsave(paste0(folder_path, "number_of_enriched_species_per_genus_all_raw.png"), plot = p2, width = 17, height = 3.5)
+# ggsave(paste0(folder_path, "number_of_enriched_species_per_genus_all_raw.pdf"), plot = p2, width = 17, height = 3.5)
+
+
+# Filter out "Not significant" if present (based on the user's description)
+# Note: If your data is already filtered, this step won't change anything.
+genus_enriched <- genus_summary %>%
+  filter(enrichment %in% c("Freshwater", "Seawater"))
+
+# Calculate the total count per Genus for sorting
+genus_total_counts <- genus_enriched %>%
+  group_by(Genus) %>%
+  summarise(Total_Count = sum(Count), .groups = 'drop') %>%
+  arrange(desc(Total_Count))
+
+# Factor the Genus column based on descending Total_Count for proper plot ordering
+genus_enriched <- genus_enriched %>%
+  mutate(Genus = factor(Genus, levels = genus_total_counts$Genus))
+
+# Calculate the overall maximum total count for the y-axis limit
+max_count <- max(genus_total_counts$Total_Count)
+
+library(scales)
+(p3 <- ggplot(genus_enriched, aes(x = Genus, y = Count, fill = enrichment)) +
+    geom_col(position = "stack") +
+    geom_text( 
+      aes(label = Count), 
+      position = position_stack(vjust = 0.5), # Centers the label within the colored segment
+      color = "white", 
+      size = 3) +
+    scale_fill_manual(values = c("Freshwater" = "#0073C2FF",  
+                                 "Seawater" = "#CD534CFF")) + 
+    labs(title = "",
+         x = "Genus", #  Sorted by Total Species Count
+         y = "Number of Species",
+         fill = "Preference") +
+    scale_y_continuous( expand = c(0, 0),  limits = c(0, max_count + 0.5), breaks = pretty_breaks(n = 5), labels = label_number(accuracy = 1)) + 
+    mytheme +
+    theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 10),
+          panel.grid.major = element_blank()))
+
+# ggsave(paste0(folder_path, "Fig_3B_number_of_enriched_species_per_genus_sig_raw.png"), plot = p3, width = 5.5, height = 3.5)
+# ggsave(paste0(folder_path, "Fig_3B_number_of_enriched_species_per_genus_sig_raw.pdf"), plot = p3, width = 5.5, height = 3.5)
+
+```
+
+
+### overlap of original communities between field and lab condition
+```{r}
+
+# Subset the dataframe by removing columns with names that contain characters in the list
+otu_table <- otu_table_native_com %>%
+  # select(-contains(remove_chars)) %>% 
+  rename(f100_b0_f_p0_r1 = Muhlendamm ,
+         f0_b100_b_p0_r1 = WarnemundeStrand)
+
+final_results <- otu_table %>% 
+  select_if(grepl("f100_b0_f", names(.)) | grepl("f0_b100_b", names(.))) %>%
+  mutate(across(everything(), ~ .x / sum(.x)))
+
+# this is the cutoff (%) to show in the stacked bar plot
+ab_cutoff <- 1
+
+# prepare dataframe for species mean abundance plot
+final_results <- data.frame(t(final_results)) %>% 
+  rownames_to_column() %>%  
+  separate(rowname, c("fresh_bac", "sea_bac", "watertype", "passage", "replicate"), "_") %>%  # , remove = FALSE # if separate not keep the name
+  dplyr::select(-replicate) %>% 
+  pivot_longer(-c(fresh_bac, sea_bac, watertype, passage), names_to = "species", values_to = "percentage") %>% 
+  mutate(watertype = factor(watertype, levels = c("f", "b"), labels = c("Freshwater", "Seawater"))) %>% 
+  unite(mix, c(fresh_bac, sea_bac), sep = "_", remove = TRUE) %>% 
+  mutate(mix = factor(mix, levels = c("f100_b0", "f0_b100"),  labels = c("freshwater community", "seawater community"))) %>% 
+  mutate(passage = factor(passage, levels = c("p0", "p1", "p2", "p3", "p4", "p5", "p6"), labels = c("Natural", "1", "2", "3", "4", "5", "6"))) %>% 
+  mutate(species = factor(species)) %>% 
+  mutate(percentage = percentage*100) %>% 
+  group_by(mix, watertype, passage, species) %>%
+  summarize(percentage = mean(percentage, na.rm=TRUE)) %>% 
+  filter(percentage > ab_cutoff) %>% 
+  droplevels()
+
+head(final_results)
+
+cat("There are", length(table(final_results$species)), "species with abundance >", ab_cutoff, "%.")
+
+(p <- ggplot(final_results, aes(x = passage, y = percentage, fill = species, label = species)) +
+    facet_grid(. ~ watertype) +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_y_continuous(expand = c(0, 0)) +
+    # scale_fill_manual(values = col) +
+    geom_text(size = 2, fontface = "italic", position = position_stack(vjust = 0.5)) +
+    labs(x = "", y = "Relative abundance (%)", title = paste("Dominant species (relative abundance > ", ab_cutoff, "%)", sep = "")) +
+    guides(fill = guide_legend(title = "species", reverse = FALSE)) +
+    mytheme +
+    theme(legend.position="none"))
+
+# ggsave(paste0(folder_path, "dominant_species_original_field_lab_raw2.pdf"), width = 14, height = 7.5, units = "cm", scale = 2,  p)
+
+```
+
+
+### Session Info
+```{r}
+sessionInfo()
+```

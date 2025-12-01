@@ -1,0 +1,423 @@
+---
+title: "The assembly based on Sloan's Neutral Model"
+author: "Jia Xiu (x.jia@rug.nl)"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+html_preview: false
+editor_options: 
+  chunk_output_type: console
+---
+
+refer: https://github.otu_table/seb369/landuse_otu_tablem_assembly
+Barnett SE, Youngblut ND, Buckley DH. Soil characteristics and land-use drive bacterial community assembly patterns, FEMS Microbiology Ecology, 2020;96(1):fiz194, doi: 10.1093/femsec/fiz194
+Burns, A., Stephens, W., Stagaman, K. et al. Contribution of neutral processes to the assembly of gut microbial communities in the zebrafish over host development. ISME J 10, 655-664 (2016) doi:10.1038/ismej.2015.142
+https://github.otu_table/seb369/landuse_otu_tablem_assembly/blob/master/Neutral_model.md
+https://static-content.springer.otu_table/esm/art%3A10.1038%2Fismej.2015.142/MediaObjects/41396_2016_BFismej2015142_MOESM54_ESM.txt
+
+
+### Initiate libraries
+```{r, message=FALSE}
+# Clear workspace
+rm(list=ls())
+
+# load libraries
+
+library(phyloseq) 
+library(tidyverse)
+# library(tibble)
+library(RColorBrewer)
+library(minpack.lm)
+library(Hmisc)
+library(ggpubr) 
+
+# plot theme
+mytheme <- theme_light()+
+  theme(text = element_text(size = 10),
+        plot.title = element_text(size = 10),
+        legend.title = element_text(face = "bold", size = 10),
+        legend.text = element_text(size = 10), 
+        legend.justification = c("right", "top"),
+        legend.background = element_rect(),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 10, color = "black"),
+        axis.ticks = element_line(colour = "grey70", linewidth = 0.2),
+        panel.grid.major = element_line(colour = "grey70", linewidth = 0.1),
+        panel.grid.minor = element_blank())  
+
+# Path to the folder containing Kraken2 report files
+folder_path <- "sloan_neutral_model_species/"
+
+# Create the directory if it does not already exist
+if (!dir.exists(folder_path)) {
+  dir.create(folder_path)
+}
+
+```
+
+
+## 1. load dataset for analysis
+```{r}
+# read phyloseq object from all the samples - raw reads
+ps_rel <- readRDS("phyloseq_object_species_rel.rds")
+
+# only keep the samples from microcosm experiment
+ps_microcosm <- subset_samples(ps_rel, category == "microcosm")
+# remove taxa do not appear in any samples
+ps_microcosm <- filter_taxa(ps_microcosm, function(x) sum(x) != 0, TRUE)
+
+otu_table <- as.data.frame(otu_table(ps_microcosm)) 
+
+otu_table <- t(otu_table)
+dim(otu_table)
+otu_table[1:5, 1:2]
+range(rowSums(otu_table))
+
+# classification based on ALDEx2 analysis
+taxa_classified <- read.csv("/Users/xiujia/Library/CloudStorage/OneDrive-TechnischeUniversitätIlmenau/Data_analysis/01_Mixing_exp._04-2023/01_16S_amplicon/01_emu_results/ALDEx2_differential_analysis_source_coms_species/ALDEx2_results_all_passage.csv", header = TRUE, row.names = 1) %>% 
+  select(-c(we.ep, we.eBH, rab.all, rab.win.b, rab.win.f, diff.btw, diff.win, effect, overlap, wi.ep, wi.eBH, significant, text_label))
+
+head(taxa_classified)
+
+```
+
+## 2 Sloan's neutral model for the total community
+```{r}
+# Calculate the number of individuals per community (based on relative abundance OTU table)
+range(apply(otu_table, 1, sum))
+
+# Calculate the average relative abundance of each taxa across communities
+p.m <- apply(otu_table, 2, mean)
+p.m <- p.m / 100
+p.m <- p.m[p.m != 0]
+p.df <- data.frame(p.m) %>% rownames_to_column(var="taxon")
+str(p.df)
+head(p.df)
+
+# Calculate the occurrence frequency of each taxa
+otu_table.bi <- 1*(otu_table>0)
+freq <- apply(otu_table.bi, 2, mean)
+freq <- freq[freq != 0]
+freq.df <- data.frame(freq) %>% rownames_to_column(var="taxon")
+str(freq.df)
+head(freq.df)
+
+# otu_tablebine the average relative abundance and occurrence of each taxa
+df <- inner_join(p.df, freq.df, by="taxon") %>% arrange(p.m)
+
+# Remove rows with any zero (absent in either source pool or local communities). double check!
+df <- df %>% filter(freq != 0, p.m != 0)
+str(df)
+p <- df$p.m
+freq <- df$freq
+
+                             
+#Calculate the limit of detection
+d <- 0.001
+
+##Fit model parameter m (or Nm) using Non-linear least squares (NLS)
+# N is the number of individuals/reads in a community, which you calculated as 100
+N <- 100
+m.fit <- nlsLM(freq ~ pbeta(d, N*m*p, N*m*(1-p), lower.tail=FALSE), start=list(m=0.1))
+m.ci <- confint(m.fit, 'm', level=0.95)
+m.sum <- summary(m.fit)
+m.coef <- coef(m.fit)
+
+##Calculate goodness-of-fit (R-squared and Root Mean Squared Error)
+freq.pred <- pbeta(d, N*coef(m.fit)*p, N*coef(m.fit)*(1-p), lower.tail=FALSE)
+Rsqr <- 1 - (sum((freq - freq.pred)^2))/(sum((freq - mean(freq))^2))
+
+
+# Get table of model fit stats
+fitstats <- data.frame(m=m.coef, m.low.ci=m.ci[1], m.up.ci=m.ci[2], 
+                       Rsqr=Rsqr, p.value=m.sum$parameters[4], N=N, 
+                       Samples=nrow(otu_table), Richness=length(p), 
+                       Detect=d)
+
+# Get confidence interval for predictions
+freq.pred.ci <- binconf(freq.pred*nrow(otu_table), nrow(otu_table), alpha=0.05, method="wilson", return.df=TRUE)
+
+# Get table of predictions
+pred.df <- data.frame(metacom_RA=p, frequency=freq.pred, 
+                      frequency_lowerCI=freq.pred.ci[,2], 
+                      frequency_upperCI=freq.pred.ci[,3]) %>%
+  unique()
+
+head(pred.df)
+
+# Get table of observed occupancy and abundance
+obs.df <- df %>%
+  rename(metacom_RA = p.m, frequency=freq)
+
+obs.df <- left_join(obs.df, taxa_classified , by = c('taxon')) %>%
+  mutate(enrichment = ifelse(is.na(enrichment), "New emergence", enrichment)) %>% 
+  column_to_rownames('taxon') %>% 
+  mutate(enrichment = factor(enrichment, levels = c("Freshwater", "New emergence", "Not significant", "Seawater"))) %>% mutate(classification = ifelse(enrichment == "New emergence", "No", "Yes"))
+
+head(obs.df)
+
+table(obs.df$enrichment)
+
+# scatter plot with fit lines for all sub-communities
+(p_all <- ggplot(data=obs.df) +
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency), color="black", alpha=.7) + 
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency_lowerCI), linetype=2, color="red", alpha=.7) + 
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency_upperCI), linetype=2, color="red", alpha=.7) + 
+    geom_point(data=obs.df, aes(x=log10(metacom_RA), y=frequency, color=enrichment, shape = classification), alpha=.7, size=1) +
+    geom_text(data=fitstats, aes(label = paste("R^2 == ", round(Rsqr, 3))), 
+              x=-5.2, y=0.9, size=4, parse=TRUE) +
+    geom_text(data=fitstats, aes(label = paste("italic(m) ==", round(m, 3))), 
+              x=-5.2, y=0.8, size=4, parse=TRUE) + 
+    scale_x_continuous(limits = c(-6.3, -1)) + 
+    scale_y_continuous(limits = c(0, 1)) + 
+    labs(x="Log10 abundance in\nmetacommunity", y="Frequency detected", title = "All sub-communities") +
+    scale_color_manual(values = c("Freshwater" = "#0073C2FF", 
+                                  "Seawater" = "#CD534CFF", 
+                                  "Not significant" = "darkgray")) +
+    scale_shape_manual(values=c(1, 19)) +
+    # scale_colour_manual(values=my_palette) + 
+    guides(colour = guide_legend(title="Habitat preference"), shape = guide_legend(title = "Deteched in \nsource communities"))+
+    mytheme
+)
+
+ggsave(paste0(folder_path, "Sloan_neutral_model_whole_microcosm.png"), p_all, width = 3.2, height = 3.2)
+
+```
+
+
+## 3. Sloan's neutral model for communities at freshwater
+```{r}
+
+otu_table_fresh <- otu_table[grep("_f_", rownames(otu_table)), ]
+otu_table_fresh[1:2, 1:2]
+
+# Calculate the number of individuals per community (based on relative abundance OTU table)
+range(apply(otu_table_fresh, 1, sum))
+
+# Calculate the average relative abundance of each taxa across communities
+p.m <- apply(otu_table_fresh, 2, mean)
+p.m <- p.m / 100
+p.m <- p.m[p.m != 0]
+p.df <- data.frame(p.m) %>% rownames_to_column(var="taxon")
+str(p.df)
+head(p.df)
+
+# Calculate the occurrence frequency of each taxa
+otu_table_fresh.bi <- 1*(otu_table_fresh > 0)
+freq <- apply(otu_table_fresh.bi, 2, mean)
+freq <- freq[freq != 0]
+freq.df <- data.frame(freq) %>% rownames_to_column(var="taxon")
+str(freq.df)
+head(freq.df)
+
+# combine the average relative abundance and occurrence of each taxa
+df <- inner_join(p.df, freq.df, by="taxon") %>% arrange(p.m)
+
+# Remove rows with any zero (absent in either source pool or local communities). double check!
+df <- df %>% filter(freq != 0, p.m != 0)
+str(df)
+
+p <- df$p.m
+freq <- df$freq
+
+                                
+#Calculate the limit of detection
+d <- 0.001
+
+##Fit model parameter m (or Nm) using Non-linear least squares (NLS)
+# N is the number of individuals/reads in a community, which you calculated as 100
+N <- 100
+m.fit <- nlsLM(freq ~ pbeta(d, N*m*p, N*m*(1-p), lower.tail=FALSE), start=list(m=0.1))
+m.ci <- confint(m.fit, 'm', level=0.95)
+m.sum <- summary(m.fit)
+m.coef <- coef(m.fit)
+
+##Calculate goodness-of-fit (R-squared and Root Mean Squared Error)
+freq.pred <- pbeta(d, N*coef(m.fit)*p, N*coef(m.fit)*(1-p), lower.tail=FALSE)
+Rsqr <- 1 - (sum((freq - freq.pred)^2))/(sum((freq - mean(freq))^2))
+
+# Get table of model fit stats
+fitstats <- data.frame(m=m.coef, m.low.ci=m.ci[1], m.up.ci=m.ci[2], 
+                       Rsqr=Rsqr, p.value=m.sum$parameters[4], N=N, 
+                       Samples=nrow(otu_table_fresh), Richness=length(p), 
+                       Detect=d)
+
+# Get confidence interval for predictions
+freq.pred.ci <- binconf(freq.pred*nrow(otu_table_fresh), nrow(otu_table_fresh), alpha=0.05, method="wilson", return.df=TRUE)
+
+# Get table of predictions
+pred.df <- data.frame(metacom_RA=p, frequency=freq.pred, 
+                      frequency_lowerCI=freq.pred.ci[,2], 
+                      frequency_upperCI=freq.pred.ci[,3]) %>%
+  unique()
+
+head(pred.df)
+
+
+# Get table of observed occupancy and abundance
+obs.df <- df %>%
+  rename(metacom_RA = p.m, frequency=freq)
+
+obs.df <- left_join(obs.df, taxa_classified , by = c('taxon')) %>%
+  mutate(enrichment = ifelse(is.na(enrichment), "New emergence", enrichment)) %>% 
+  column_to_rownames('taxon') %>% 
+  mutate(enrichment = factor(enrichment, levels = c("Freshwater", "New emergence", "Not significant", "Seawater"))) %>% mutate(classification = ifelse(enrichment == "New emergence", "No", "Yes"))
+
+head(obs.df)
+
+table(obs.df$enrichment)
+
+(p_freshwater <- ggplot(data=obs.df) +
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency), color="black", alpha=.7) + 
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency_lowerCI), linetype=2, color="red", alpha=.7) + 
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency_upperCI), linetype=2, color="red", alpha=.7) + 
+    geom_point(data=obs.df, aes(x=log10(metacom_RA), y=frequency, color=enrichment, shape = classification), alpha=.7, size=1) +
+    geom_text(data=fitstats, aes(label = paste("R^2 == ", round(Rsqr, 3))), 
+              x=-5.2, y=0.9, size=4, parse=TRUE) +
+    geom_text(data=fitstats, aes(label = paste("italic(m) ==", round(m, 3))), 
+              x=-5.2, y=0.8, size=4, parse=TRUE) + 
+    scale_x_continuous(limits = c(-6.3, -1)) + 
+    scale_y_continuous(limits = c(0, 1)) + 
+    labs(x="Log10 abundance in\nmetacommunity", y="Frequency detected", title = "Freshwater") +
+    scale_color_manual(values = c("Freshwater" = "#0073C2FF", 
+                                  "Seawater" = "#CD534CFF", 
+                                  "Not significant" = "darkgray")) +
+    scale_shape_manual(values=c(1, 19)) +
+    # scale_colour_manual(values=my_palette) + 
+    guides(colour = guide_legend(title="Habitat preference"), shape = guide_legend(title = "Deteched in \nsource communities"))+
+    mytheme
+)
+
+ggsave(paste0(folder_path, "Sloan_neutral_model_freswater19.png"), p_fresh, width = 5, height = 3.2)
+
+```
+
+## 4. Sloan's neutral model for communities at seawater
+```{r}
+
+otu_table_sea <- otu_table[grep("_b_", rownames(otu_table)), ]
+otu_table_sea[1:2, 1:2]
+
+# Calculate the number of individuals per community (based on relative abundance OTU table)
+range(apply(otu_table_sea, 1, sum))
+
+# Calculate the average relative abundance of each taxa across communities
+p.m <- apply(otu_table_sea, 2, mean)
+p.m <- p.m / 100
+p.m <- p.m[p.m != 0]
+p.df <- data.frame(p.m) %>% rownames_to_column(var="taxon")
+str(p.df)
+head(p.df)
+
+# Calculate the occurrence frequency of each taxa
+otu_table_sea.bi <- 1*(otu_table_sea>0)
+freq <- apply(otu_table_sea.bi, 2, mean)
+freq <- freq[freq != 0]
+freq.df <- data.frame(freq) %>% rownames_to_column(var="taxon")
+str(freq.df)
+head(freq.df)
+
+# combine the average relative abundance and occurrence of each taxa
+df <- inner_join(p.df, freq.df, by="taxon") %>% arrange(p.m)
+
+# Remove rows with any zero (absent in either source pool or local communities). double check!
+df <- df %>% filter(freq != 0, p.m != 0)
+str(df)
+
+p <- df$p.m
+freq <- df$freq
+
+                                
+#Calculate the limit of detection
+d <- 0.001
+
+##Fit model parameter m (or Nm) using Non-linear least squares (NLS)
+# N is the number of individuals/reads in a community, which you calculated as 100
+N <- 100
+m.fit <- nlsLM(freq ~ pbeta(d, N*m*p, N*m*(1-p), lower.tail=FALSE), start=list(m=0.1))
+m.ci <- confint(m.fit, 'm', level=0.95)
+m.sum <- summary(m.fit)
+m.coef <- coef(m.fit)
+
+##Calculate goodness-of-fit (R-squared and Root Mean Squared Error)
+freq.pred <- pbeta(d, N*coef(m.fit)*p, N*coef(m.fit)*(1-p), lower.tail=FALSE)
+Rsqr <- 1 - (sum((freq - freq.pred)^2))/(sum((freq - mean(freq))^2))
+
+
+# Get table of model fit stats
+fitstats <- data.frame(m=m.coef, m.low.ci=m.ci[1], m.up.ci=m.ci[2], 
+                       Rsqr=Rsqr, p.value=m.sum$parameters[4], N=N, 
+                       Samples=nrow(otu_table_sea), Richness=length(p), 
+                       Detect=d)
+
+# Get confidence interval for predictions
+freq.pred.ci <- binconf(freq.pred*nrow(otu_table_sea), nrow(otu_table_sea), alpha=0.05, method="wilson", return.df=TRUE)
+
+# Get table of predictions
+pred.df <- data.frame(metacom_RA=p, frequency=freq.pred, 
+                      frequency_lowerCI=freq.pred.ci[,2], 
+                      frequency_upperCI=freq.pred.ci[,3]) %>%
+  unique()
+
+head(pred.df)
+
+
+# Get table of observed occupancy and abundance
+obs.df <- df %>%
+  rename(metacom_RA = p.m, frequency=freq)
+
+obs.df <- left_join(obs.df, taxa_classified , by = c('taxon')) %>%
+  mutate(enrichment = ifelse(is.na(enrichment), "New emergence", enrichment)) %>% 
+  column_to_rownames('taxon') %>% 
+  mutate(enrichment = factor(enrichment, levels = c("Freshwater", "New emergence", "Not significant", "Seawater"))) %>% mutate(classification = ifelse(enrichment == "New emergence", "No", "Yes"))
+
+head(obs.df)
+
+table(obs.df$enrichment)
+
+(p_seawater <- ggplot(data=obs.df) +
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency), color="black", alpha=.7) + 
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency_lowerCI), linetype=2, color="red", alpha=.7) + 
+    geom_line(data=pred.df, aes(x=log10(metacom_RA), y=frequency_upperCI), linetype=2, color="red", alpha=.7) + 
+    geom_point(data=obs.df, aes(x=log10(metacom_RA), y=frequency, color=enrichment, shape = classification), alpha=.7, size=1) +
+    geom_text(data=fitstats, aes(label = paste("R^2 == ", round(Rsqr, 3))), 
+              x=-5.2, y=0.9, size=4, parse=TRUE) +
+    geom_text(data=fitstats, aes(label = paste("italic(m) ==", round(m, 3))), 
+              x=-5.2, y=0.8, size=4, parse=TRUE) + 
+    scale_x_continuous(limits = c(-6.3, -1)) + 
+    scale_y_continuous(limits = c(0, 1)) + 
+    labs(x="Log10 abundance in\nmetacommunity", y="Frequency detected", title = "Seawater") +
+    scale_color_manual(values = c("Freshwater" = "#0073C2FF", 
+                                  "Seawater" = "#CD534CFF", 
+                                  "Not significant" = "darkgray")) +
+    scale_shape_manual(values=c(1, 19)) +
+    # scale_colour_manual(values=my_palette) + 
+    guides(colour = guide_legend(title="Habitat preference"), shape = guide_legend(title = "Deteched in \nsource communities"))+
+    mytheme)
+
+
+ggsave(paste0(folder_path, "Sloan_neutral_model_seawater.png"), p_fresh, width = 5, height = 3.2)
+
+```
+
+```{r}
+
+# combine all the plots
+
+(p <- ggarrange(p_all, p_freshwater, p_seawater, labels = c("A", "B", "C"), 
+  common.legend = TRUE, legend = "right", ncol = 1, nrow = 3, align = "hv"))
+
+# ggsave(paste0(folder_path, "Fig_5_Sloan_neutral_model_all_freshwater_seawater.png"), p, width = 4, height = 7.5)
+# ggsave(paste0(folder_path, "Fig_5_Sloan_neutral_model_all_freshwater_seawater_raw.pdf"), p, width = 4, height = 7.5)
+
+# only freshwater and seawater
+(p <- ggarrange(p_freshwater, p_seawater, labels = c("A", "B"), 
+  common.legend = TRUE, legend = "right", ncol = 2, nrow = 1, align = "hv"))
+
+# ggsave(paste0(folder_path, "Fig_5_Sloan_neutral_model_freshwater_seawater.png"), p, width = 6.5, height = 2.5)
+# ggsave(paste0(folder_path, "Fig_5_Sloan_neutral_model_freshwater_seawater_raw.pdf"), p, width = 6.5, height = 2.5)
+
+```
+
+### Session Info
+```{r}
+sessionInfo()
+```

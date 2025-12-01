@@ -1,0 +1,284 @@
+---
+title: "summary EMU results of the mock communities based on barbell demultiplex"
+author: "Xiu Jia"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+### Initiate libraries & set figure theme
+```{r message=FALSE, warning=FALSE}
+
+# Clean console
+rm(list=ls())
+
+# Load libraries
+library(tidyverse)
+library(phyloseq)
+library(ggpubr)
+# https://journal.r-project.org/articles/RJ-2023-071/ 
+# palette.colors() 
+# palette.pals()
+# hcl.colors(9, palette = "Purple-Green")
+# The former provides a range of popular qualitative palettes for categorical data while the latter closely approximates many popular sequential and diverging palettes by systematically varying the perceptual hue, chroma, and luminance (HCL) properties in the palette. 
+
+
+
+mytheme <- theme_light()+
+  theme(text = element_text(size = 10),
+        legend.title = element_text(face = "bold", size = 10),
+        legend.text = element_text(size = 10), 
+        legend.justification = c("right", "top"),
+        legend.background = element_rect(),
+        plot.title = element_text(size = 10),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 10, color = "black"),
+        axis.ticks = element_line(colour = "grey70", linewidth = 0.2),
+        panel.grid.major = element_line(colour = "grey70", linewidth = 0.1),
+        panel.grid.minor = element_blank())  
+
+# Path to the folder containing EMU report files
+folder_path <- "mock_com_barbell_emu"
+
+# Create the directory if it does not already exist
+if (!dir.exists(folder_path)) {
+  dir.create(folder_path)
+}
+
+```
+
+
+### only select Species from the EMU report files
+```{r}
+
+
+# read phyloseq object from all the samples
+ps_rel <- readRDS("phyloseq_object_species_rel.rds")
+
+otu_table <- as.data.frame(otu_table(ps_rel))
+
+
+# Subset the dataframe by removing columns with names that contain characters in the list
+otu_table_mock <- otu_table %>%
+  select( grep("Mock", names(otu_table))) %>% 
+  filter_all(any_vars(. != 0)) 
+# select(contains(keep_chars))
+
+dim(otu_table_mock)
+colSums(otu_table_mock)
+otu_table_mock[1:2, 1:2]
+
+### mock community results from my dataset
+# Visualize the data of mock communities
+otu_table_mock_rel_long <- otu_table_mock %>%
+  rownames_to_column(var = "species") %>%
+  pivot_longer(-species, names_to = "Sample", values_to = "Percentage") %>%
+  mutate(species = factor(species))
+
+otu_table_mock_rel_wider <- otu_table_mock_rel_long %>%
+  pivot_wider(names_from = Sample, values_from = Percentage) %>% 
+  rename(Species = species)
+
+dim(otu_table_mock_rel_wider)
+head(otu_table_mock_rel_wider)
+
+
+# load Expected distribution of mock community from ZymoBIOMICS
+
+df_expected <- read.csv("ZymoBIOMICS_expected_composition_mock_communities.csv", header = TRUE, check.names = FALSE) %>% 
+  select(Distribution, Genus, Species, Expected_composition_16S) %>% 
+  filter(!is.na(Expected_composition_16S)) %>% 
+  # mutate(Genus = factor(Genus, c("Bacillus", "Listeria", "Staphylococcus", "Enterococcus", "Lactobacillus", "Salmonella", "Escherichia", "Pseudomonas"))) %>% 
+  mutate(Species = factor(Species, c("Bacillus subtilis", "Listeria monocytogenes", "Staphylococcus aureus", "Enterococcus faecalis", "Limosilactobacillus fermentum", "Salmonella enterica", "Escherichia coli", "Pseudomonas aeruginosa"))) %>% 
+  mutate(Species = fct_reorder(Species, Expected_composition_16S, .desc = FALSE)) %>%
+  droplevels()
+
+df_expected 
+
+# change the color
+palette.pals() 
+palette("Tableau 10");palette()
+col <- c("#FF9DA7", "#4E79A7", "#B07AA1", "#59A14F", "#EDC948", "#F28E2B", "#E15759", "#76B7B2")
+
+
+# Mock communities (Expected composition) - ZymoBIOMICS - species level
+(p <- ggplot(df_expected, aes(x = Distribution, y = Expected_composition_16S, fill = Species)) +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(values = col) +
+    # geom_text(size = 3, fontface = "italic", position = position_stack(vjust = 0.5)) +
+    labs(x = "", y = "Relative abundance (%)", title = "") +
+    # guides(fill = guide_legend(title = "", reverse = FALSE)) +
+    
+    mytheme + theme(legend.text  = element_text(face = "italic")) ) 
+
+# ggsave(paste0(folder_path, "/ZymoBIOMICS_Expected_composition_species_level.png"), width = 4, height = 3, p)
+
+
+### combine mock from my dataset to the Expected one
+
+df_expected_wider <-  df_expected %>% 
+  select(-Genus) %>% 
+  pivot_wider(names_from = Distribution, values_from = Expected_composition_16S)
+
+df_expected_wider
+
+df <- otu_table_mock_rel_wider %>% 
+  left_join(df_expected_wider, by = "Species")
+
+head(df)
+
+# write.csv(df, paste0(folder_path, "/Mock_Measured_Expected.csv"))
+
+df <- df_expected_wider %>%
+  left_join(otu_table_mock_rel_wider, by = "Species") 
+df
+
+# write.csv(df, paste0(folder_path, "/Mock_Expected_Measured.csv"))
+
+
+# plot mock Measured and Expected together
+df1 <- df %>% 
+  pivot_longer(-Species, names_to = "sample", values_to = "percentage") %>% 
+  mutate(type = ifelse(grepl("Even", sample), "Even", "Log")) %>% 
+  mutate(Measured_theo = ifelse(grepl("Mock", sample), "Measured distribution", "Expected distribution")) %>% 
+  mutate(sample = factor(sample, levels = c("Even", "EvenMock_r1", "EvenMock_r2", "EvenMock_r3", "Log", "LogMock_r1", "LogMock_r2", "LogMock_r3"), labels = c("Expected", "r1", "r2", "r3", "Expected", "r1", "r2", "r3"))) %>% 
+  # mutate(Species = factor(Species, c("Bacillus", "Listeria", "Staphylococcus", "Enterococcus", "Lactobacillus", "Salmonella", "Escherichia", "Pseudomonas"))) %>% 
+  droplevels()
+
+df1$percentage <- round(df1$percentage, 2)
+
+head(df1)
+summary(df1)
+
+# Mock communities (Expected vs. Measured composition) - ZymoBIOMICS
+(p_all <- ggplot(df1, aes(x = sample, y = percentage, fill = Species, label = percentage)) +
+    facet_grid(. ~ type) +
+    geom_bar(stat = "identity", width = 0.8) + # , alpha = 0.4
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(values = col) +
+    geom_text(size = 2, position = position_stack(vjust = 0.5), alpha = 0.8) +
+    labs(x = "", y = "Relative abundance (%)", title = "") +
+    guides(fill = guide_legend(title = "Species", reverse = FALSE)) +
+    mytheme +
+    theme(legend.text = element_text(face = "italic"))) 
+
+# ggsave(paste0(folder_path, "/ZymoBIOMICS_barbel_Measured_Expected_raw.pdf"), width = 7, height = 2.8, p_all)
+
+(p <- ggplot(df1, aes(x = sample, y = percentage, fill = Species, label = percentage)) +
+    facet_grid(Species ~ type, scales = "free") +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(values = col) +
+    # scale_fill_brewer(palette = "Pastel1", direction = -1) +
+    geom_text(size = 2.5, position = position_stack(vjust = 0.5)) +
+    labs(x = "", y = "Relative abundance (%)", title = "") +
+    guides(fill = guide_legend(title = "Species", reverse = FALSE)) +
+    mytheme +
+    theme(legend.text = element_text(face = "italic"))) 
+
+# ggsave(paste0(folder_path, "/ZymoBIOMICS_barbel_Measured_Expected_separated_in_facet.png"), width = 5, height = 7, p)
+
+(p <- ggplot(df1, aes(x = sample, y = percentage, fill = Species, label = percentage)) +
+    facet_wrap(type ~ Species, scales = "free") +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(values = col) +
+    geom_text(size = 2.5, position = position_stack(vjust = 0.5)) +
+    labs(x = "", y = "Relative abundance (%)", title = "") +
+    guides(fill = guide_legend(title = "Species", reverse = FALSE)) +
+    mytheme +
+    theme(legend.text = element_text(face = "italic"))) 
+
+# ggsave(paste0(folder_path, "/ZymoBIOMICS_barbel_Measured_Expected_wrap_raw.pdf"), width = 7, height = 7, p)
+
+
+## scatter plot
+df_even <- df %>% 
+  pivot_longer(-c(Species, Even, Log), names_to = "Sample", values_to = "Percentage_measured") %>% 
+  mutate(Even = ifelse(grepl("EvenMock_", Sample), Even, NA)) %>% 
+  mutate(Log = ifelse(grepl("LogMock_", Sample), Log, NA)) %>% 
+  pivot_longer(-c(Species, Sample, Percentage_measured), names_to = "type", values_to = "Percentage_expected") %>% 
+  drop_na() %>% 
+  filter(type == "Even")
+
+# Mean Absolute Error
+(MAE <- mean(abs(df_even$Percentage_measured - df_even$Percentage_expected)))
+#Root Mean Square Error
+(RMSE <- sqrt(mean((df_even$Percentage_measured - df_even$Percentage_expected)^2)))
+
+
+cor_result <- cor.test(df_even$Percentage_expected, df_even$Percentage_measured, method = "pearson")
+cor_result
+r_value <- cor_result$estimate   # Pearson r
+p_value <- cor_result$p.value    # p-value
+
+model <- lm(Percentage_expected ~ Percentage_measured, data = df_even)
+summary_model <- summary(model)
+summary_model
+r_squared <- summary_model$r.squared   # R²
+p_value_lm <- summary_model$coefficients[2,4]  # p-value of the slope
+
+
+(p_even <- ggplot(df_even, aes(x = Percentage_expected, y = Percentage_measured, color = Species)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "darkred", alpha = 0.5, size = 0.8) +  # y = x line
+    geom_point(size = 3, alpha = 0.5) +
+    annotate("text", x = 5, y = 22,  # you adjust these coordinates to your plot
+           label = paste0("r = ", round(r_value, 2), ", p = ", formatC(p_value, format = "e", digits = 2)), size = 3, hjust = 0) +
+    scale_color_manual(values = col) +
+    guides(color = guide_legend(title = "Species", reverse = FALSE)) +
+    labs(x = "Expected relative abundance (%)", y = "Measured relative abundance (%)", title = "Even Distribution") +
+    mytheme +
+    theme(legend.text = element_text(face = "italic"))) 
+
+df_log <- df %>% 
+  pivot_longer(-c(Species, Even, Log), names_to = "Sample", values_to = "Percentage_measured") %>% 
+  mutate(Even = ifelse(grepl("EvenMock_", Sample), Even, NA)) %>% 
+  mutate(Log = ifelse(grepl("LogMock_", Sample), Log, NA)) %>% 
+  pivot_longer(-c(Species, Sample, Percentage_measured), names_to = "type", values_to = "Percentage_expected") %>% 
+  # mutate(Species = factor(Species, c( "Bacillus", "Listeria", "Staphylococcus", "Enterococcus", "Lactobacillus", "Salmonella", "Escherichia", "Pseudomonas"))) %>% 
+  drop_na() %>% 
+  filter(type == "Log")
+
+# Mean Absolute Error
+(MAE <- mean(abs(df_log$Percentage_measured - df_log$Percentage_expected)))
+#Root Mean Square Error
+(RMSE <- sqrt(mean((df_log$Percentage_measured - df_log$Percentage_expected)^2)))
+
+cor_result <- cor.test(df_log$Percentage_expected, df_log$Percentage_measured, method = "pearson")
+cor_result
+r_value <- cor_result$estimate   # Pearson r
+p_value <- cor_result$p.value    # p-value
+
+model <- lm(Percentage_expected ~ Percentage_measured, data = df_log)
+summary_model <- summary(model)
+summary_model
+r_squared <- summary_model$r.squared   # R²
+p_value_lm <- summary_model$coefficients[2,4]  # p-value of the slope
+
+
+(p_log <- ggplot(df_log, aes(x = Percentage_expected, y = Percentage_measured, color = Species)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "darkred", alpha = 0.5, size = 0.8) +  # y = x line
+    geom_point(size = 3, alpha = 0.5) +
+    annotate("text", x = 0.0001, y = 96,  # you adjust these coordinates to your plot
+           label = paste0("r = ", round(r_value, 4), ", p = ", formatC(p_value, format = "e", digits = 2)), size = 3, hjust = 0) +
+    scale_x_log10() +
+    scale_y_log10() +
+    scale_color_manual(values = col) +
+    guides(color = guide_legend(title = "Species", reverse = FALSE)) +
+    labs(x = "Expected relative abundance (%)", y = "Measured relative abundance (%)", title = "Log Distribution") +
+    mytheme +
+    theme(legend.text = element_text(face = "italic"))) 
+
+(p <- ggarrange(p_even, p_log, labels = c("A", "B"), font.label = list(size = 10), widths = c(1, 1.08), nrow = 1, ncol = 2, common.legend = TRUE, legend = "right"))
+
+# ggsave(paste0(folder_path, "/ZymoBIOMICS_Measured_Expected_scatter_plot_raw.pdf"), width = 8, height = 2.8, p)
+
+```
+
+
+### Session Info
+```{r}
+sessionInfo()
+```
