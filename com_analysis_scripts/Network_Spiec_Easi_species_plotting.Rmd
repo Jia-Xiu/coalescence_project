@@ -1,0 +1,1989 @@
+---
+title: "Co-occurrence Network Plotting colored by watertype"
+author: "Xiu Jia"
+email: "xibeihenai@gmail.com"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+
+# 1. Load libraries and work directory
+```{r  Load-libraries-set-up, message = FALSE, warning = FALSE}
+
+# clean the work enviornment
+rm(list=ls())
+
+library(tidyverse) 
+library(phyloseq)
+library(microbiome)
+
+library(SpiecEasi) # building network
+library(igraph)
+
+# library(ggplot2)
+# library(dplyr)
+# library(tidyr)
+# library(purrr)
+library(patchwork)
+library(qgraph)        # smallworldness()
+library(DescTools)     # AUC()
+library(brainGraph)    # robustness()
+
+library(intergraph)
+library(GGally)
+library(network)
+library(ggrepel)
+library(ggnewscale)   # two colour scales in one ggplot
+library(Matrix)
+library(patchwork)    # combine panels side-by-side
+library(RColorBrewer)
+library(stringr)
+library(ggupset)
+library(forcats)
+library(circlize)
+library(kableExtra)
+
+
+# change the base path where to save the outputs accordingly.
+folder_path <- "network_Spiec_Easi_species/"
+ALDEx2_path <- "ALDEx2_differential_analysis_source_coms_species/"
+ALDEx2_path_watertype <- "ALDEx2_differential_analysis_watertype_species/"
+if (!dir.exists(ALDEx2_path_watertype)) {
+  dir.create(ALDEx2_path_watertype, recursive = TRUE)
+  message("Directory created: ", ALDEx2_path_watertype)
+} else {
+  message("Directory already exists. No changes made.")
+}
+
+```
+
+***
+# 2. Plotting the network
+
+## Step 1 – Load network data and feature table
+
+```{r load-data}
+
+# ── SpiecEasi network ─────────────────────────────────────────────────────────
+network_full_filtered <- readRDS(paste0(folder_path, "network_full_filtered.rds"))
+
+# ── Module membership (from your earlier cluster_louvain step) ────────────────
+# Expected columns: species, module
+mod_mem <- read.csv(paste0(folder_path, "module_list.csv"), row.names = 1) %>%
+  dplyr::rename(species = Node) %>%           # adjust column name if different
+  mutate(module = as.factor(Module))
+
+# ── ALDEx2 enrichment ─────────────────────────────────────────────────────────
+aldex_source <- read.csv(paste0(ALDEx2_path, "ALDEx2_results_all_passage.csv"),
+                       check.names = FALSE) %>%
+  dplyr::select(taxon, enrichment, significant, rab.win.b, rab.win.f) %>%
+  dplyr::filter(significant != "no_sig") %>%
+  dplyr::distinct(taxon, .keep_all = TRUE) %>%
+  dplyr::rename(species = taxon)
+
+cat("Enriched taxa:", nrow(aldex_source), "\n")
+
+
+## ─── Load feature table data  ────────────────────────────────────────────────
+## The data format we need is a phyloseq object. Here, we combine the OTU table, (simplified) taxonomy table, and the sample metadata (all .csv files) into a phyloseq object. If you have the phloseq object, just start from there. 
+
+# read phyloseq object
+ps_rawreads <- readRDS("phyloseq_object_species_rawreads.rds")
+
+# only keep the samples from microcosm experiment
+ps_microcosm <- subset_samples(ps_rawreads, category == "microcosm")
+
+# remove taxa do not appear in any samples
+ps_microcosm <- filter_taxa(ps_microcosm, function(x) sum(x) != 0, TRUE)
+ps_microcosm
+# saveRDS(ps_microcosm, file = "phyloseq_object_species_rawreads_microcosm.rds")
+
+# Remove taxa not seen more than 5 times in at least 2% of the samples. This protects against an taxa with small mean & trivially large C.V.
+min_samples <- ceiling(0.02 * nsamples(ps_microcosm))
+min_samples
+
+# Remove taxa not seen more than 4 times of the samples. This protects against an taxa with small mean & trivially large C.V.
+ps_microcosm_filtered <- filter_taxa(ps_microcosm, function(x) sum(x != 0) >= 4, prune = TRUE) # or replace the number by min_samples
+ps_microcosm_filtered
+
+```
+
+***
+
+## Step 2 – Rebuild igraph
+
+```{r rebuild-igraph}
+
+temp   <- symBeta(getOptBeta(network_full_filtered), mode = "maxabs") # `symBeta` extracts the optimal beta coefficient matrix from the SpiecEasi result — this is a sparse matrix where each value represents the partial correlation strength between two species (positive = co-occurrence, negative = mutual exclusion). `getOptBeta` makes it symmetric because the raw beta matrix is not perfectly symmetric (species A→B may differ slightly from B→A). mode = "maxabs" keeps the larger absolute value of the two directions for each pair
+
+weight <- Matrix::summary(t(temp))[, 3]
+
+ig_net <- adj2igraph(
+  getRefit(network_full_filtered),  # the adjacency matrix (0/1 presence of edges)
+  diag        = TRUE,               # include diagonal (self-loops, needed for indexing)
+  edge.attr   = list(weight = weight),            # attach weights to edges
+  vertex.attr = list(name = taxa_names(ps_microcosm_filtered))      # attach species names to nodes
+)
+
+cat("Nodes:", vcount(ig_net), "| Edges:", ecount(ig_net), "\n")
+```
+
+***
+
+## Step 3 – Shared layout & base data frames
+
+*All three plots use the **same** `coords` matrix so nodes sit in identical
+positions — essential for overlay in PowerPoint/Keynote.*
+
+```{r shared-layout}
+# ── Fixed layout (abs weights so FR accepts them) ────────────────────────────
+set.seed(42)
+
+ig_layout <- ig_net
+
+# replaces all edge weights with their absolute values in the copy — because layout_with_fr() only accepts positive weights
+E(ig_layout)$weight <- abs(E(ig_net)$weight) 
+
+# Runs the Fruchterman-Reingold algorithm, a physics-based layout that treats edges like springs and nodes like repelling magnets, pulling strongly connected species close together and pushing unconnected ones apart.
+coords <- igraph::layout_with_fr(ig_layout)
+
+# ── Edge data frame (will be used for the plots below) ────────────────────────
+edge_df <- as.data.frame(get.edgelist(ig_net)) %>%
+  dplyr::rename(from = V1, to = V2) %>%
+  mutate(
+    x    = coords[match(from, V(ig_net)$name), 1],
+    y    = coords[match(from, V(ig_net)$name), 2],
+    xend = coords[match(to,   V(ig_net)$name), 1],
+    yend = coords[match(to,   V(ig_net)$name), 2],
+    edge_color = ifelse(E(ig_net)$weight > 0, "#d8b365", "#5ab4ac"),
+    abs_weight = abs(E(ig_net)$weight)  
+  )
+
+# ── Taxonomy table ────────────────────────────────────────────────────────────
+tax_df <- as.data.frame(tax_table(ps_microcosm_filtered)) %>%
+  rownames_to_column("species")
+
+# ── mean CLR across all samples ──────────────────────────────────────
+otu_mat    <- otu_table(ps_microcosm_filtered)
+clr_mat    <- clr(otu_mat)                         # CLR-transform, taxa × samples
+clr_mean <- apply(clr_mat, 1, mean)            # mean across all 240 samples
+
+
+# ── Run ALDEx2 on the full table to see the difference between freshwater and seawater env
+# library(ALDEx2)
+# 
+# otu_aldex  <- as.data.frame(otu_table(ps_microcosm_filtered))  # taxa × samples
+# meta_aldex <- data.frame(sample_data(ps_microcosm_filtered))
+# watertype  <- meta_aldex$watertype                             # "f" or "b"
+# 
+# # CLR transformation with 1000 Monte Carlo samples
+# aldex_clr_full <- aldex.clr(otu_aldex, watertype, mc.samples = 1000, denom = "all")
+# 
+# # Effect sizes — this gives rab.win.b and rab.win.f for ALL 401 taxa
+# aldex_effect_full <- aldex.effect(aldex_clr_full)
+# 
+# aldex_ttest_full <- aldex.ttest(aldex_clr_full)
+# 
+# # Combine differential testing and effect sizes
+# aldex_full <- data.frame(aldex_effect_full, aldex_ttest_full)
+# head(aldex_full)
+# 
+# write.csv(aldex_full, paste0(ALDEx2_path_watertype, "ALDEx2_results_all_passage.csv"))
+
+
+aldex_full <-  read.csv(paste0(ALDEx2_path_watertype, "ALDEx2_results_all_passage.csv"), row.names = 1)
+
+# abund_full <- aldex_full %>%
+#   rownames_to_column("species") %>%
+#   dplyr::select(species, rab.all, rab.win.b, rab.win.f, diff.btw, wi.eBH) %>%
+#   mutate(
+#     # Significant = Wilcoxon BH-corrected p < 0.05
+#     sig = wi.eBH < 0.05,
+# 
+#     # Node abundance logic:
+#     # - if significant AND diff.btw > 0 → freshwater enriched → use rab.win.f
+#     # - if significant AND diff.btw < 0 → seawater enriched  → use rab.win.b
+#     # - if not significant               → generalist         → use rab.all
+#     node_abund = case_when(
+#       sig & diff.btw > 0 ~ rab.win.f,   # freshwater enriched
+#       sig & diff.btw < 0 ~ rab.win.b,   # seawater enriched
+#       TRUE               ~ rab.all       # not significantly different
+#     ),
+# 
+#     dominant_wt = case_when(
+#       sig & diff.btw > 0 ~ "Freshwater",
+#       sig & diff.btw < 0 ~ "Seawater",
+#       TRUE               ~ "Not significant"
+#     )
+#   )
+
+# Pull rab.all from your existing aldex_full
+clr_all <- aldex_full %>%
+  rownames_to_column("species") %>%
+  dplyr::select(species, rab.all)
+
+# Rescale to [2, 10]
+clr_all <- clr_all %>%
+  mutate(
+    node_size = 2 + 8 * (rab.all - min(rab.all)) /
+                        diff(range(rab.all))
+  )
+
+summary(clr_all$rab.all)    # should show real variation
+head(clr_all)
+
+
+# ── Master node data frame ────────────────────────────────────────────
+node_df <- data.frame(
+  species = V(ig_net)$name,
+  x       = coords[, 1],
+  y       = coords[, 2],
+  stringsAsFactors = FALSE
+) %>%
+  left_join(clr_all, by = "species") %>%   # brings in rab.all + node_size
+  dplyr::rename(clr_abund = rab.all) %>%
+   
+  # enrichment from SOURCE communities CSV — used for node colour in plot_A
+  left_join(aldex_source %>% dplyr::select(species, enrichment), by = "species") %>%
+  mutate(
+    enrichment = case_when(
+      enrichment == "Freshwater" ~ "Freshwater",
+      enrichment == "Seawater"   ~ "Seawater",
+      TRUE                        ~ "Not significant"
+    )
+  ) %>%
+  # module
+  left_join(mod_mem %>% dplyr::select(species, module), by = "species") %>%
+  mutate(module = as.factor(ifelse(is.na(module), "unassigned",
+                                   as.character(module)))) %>%
+  # taxonomy
+  left_join(tax_df %>% dplyr::select(species, family, phylum), by = "species") %>%
+  mutate(
+    phylum = ifelse(is.na(phylum) | phylum == "", "Unknown", phylum),
+    family = ifelse(is.na(family) | family == "", "Unknown", family)
+  )
+
+# ── Sanity checks ─────────────────────────────────────────────────────────────
+cat("CLR mean range:", round(range(node_df$clr_abund), 2), "\n")
+cat("Node size range:",  round(range(node_df$node_size), 2), "\n")
+table(node_df$enrichment)    # from source community ALDEx2
+head(node_df)
+
+# ── Enriched-species label df (shared) ───────────────────────────────────────
+label_enrich <- node_df %>% filter(enrichment != "Not significant")
+
+# ── Define colors of species that enriched in source communities──────────────
+enrich_colors <- c(
+  "Freshwater"      = "#2166ac",
+  "Seawater"        = "#d6604d",
+  "Not significant" = "grey80"
+)
+
+# ── Plot source enriched species in each module with family info ─────────────
+enrich_summary <- node_df %>%
+  filter(enrichment != "Not significant") %>%
+  mutate(
+    species = fct_reorder(species, clr_abund),   # ← was node_size, now clr_abund
+    module  = paste0("Module ", module)
+  )
+
+head(enrich_summary)
+
+# build a family colour palette matching your enrichment_summary families
+family_list   <- sort(unique(enrich_summary$family))
+n_fam         <- length(family_list)
+paired_ext    <- colorRampPalette(brewer.pal(12, "Paired"))
+family_pal    <- setNames(paired_ext(n_fam), family_list)
+
+(plot_family_module <- ggplot(enrich_summary,
+       aes(x = node_size, y = species, fill = family)) +   # ← fill = family
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = family), x = 0.2, hjust = 0,
+            size = 2.5, fontface = "italic", colour = "grey20") +
+  facet_grid(module ~ enrichment, scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = family_pal, name = "Family") +
+      labs(x = "Mean CLR abundance",   
+     y = NULL,
+     title = "Enriched species by family and module") +
+  theme_minimal(base_size = 11) +
+  theme(
+    strip.text.y    = element_text(angle = 0, face = "bold", size = 9),
+    strip.text.x    = element_text(face = "bold"),
+    legend.position = "none", # legend.position = "right",
+    axis.text.y     = element_text(face = "italic", size = 8),
+    panel.spacing   = unit(0.3, "lines")
+  ))
+
+# ggsave(paste0(folder_path, "Network_module_species_family_summary.pdf"), plot_family_module, width = 5.5, height = 7)
+
+# ─ upset plot to summary the number of families of source community in each module ─────────────
+upset_df <- node_df %>%
+  filter(enrichment != "Not significant") %>%
+  mutate(module = paste0("Module ", module)) %>%
+  dplyr::select(species, family, module, enrichment) %>%
+  # count species per family × module combination
+  group_by(family, module, enrichment) %>%
+  summarise(n_species = n(), .groups = "drop") %>%
+  # each row = one family, groups = which modules it appears in
+  group_by(family, enrichment) %>%
+  summarise(
+    groups    = list(unique(module)),
+    n_species = sum(n_species),
+    .groups   = "drop"
+  )
+
+(plot_module_summary <- ggplot(upset_df, aes(x = groups, y = n_species, fill = enrichment)) +
+  geom_col() +
+  # add family name inside each bar
+  geom_text(
+    aes(label = paste0(family, "\n(n=", n_species, ")")), #   aes(label = family),
+    position = position_stack(vjust = 0.5),
+    size     = 2.5, fontface = "italic", colour = "white"
+  ) +
+  scale_x_upset(n_intersections = 20) +
+  scale_fill_manual(values = enrich_colors) +
+  labs(
+    # title = "Number of enriched species per family × module",
+    x     = NULL,
+    y     = "Number of species",
+    fill  = "Enrichment in \nsource communities"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme_combmatrix(combmatrix.label.text = element_text(size = 9)) +
+  theme(
+    plot.title      = element_text(face = "bold", hjust = 0.5),
+    legend.position = "right"
+  ))
+
+
+# ggsave(paste0(folder_path, "Network_module_family_summary_upset.pdf"), plot_module_summary, width = 7.5, height = 4.5)
+
+```
+
+***
+
+## Step 4 – Shared plot helper function
+
+*A single helper `base_net_plot()` draws edges + nodes at fixed size, then
+each panel adds its own colour scale on top. This guarantees identical
+canvas size, margins, and node positions.*
+
+```{r plot-helper}
+# Canvas dimensions — change here once to resize all three plots together
+PLOT_W <- 9
+PLOT_H <- 6
+
+# ── Base layer: edges only ────────────────────────────────────────────────────
+base_edges <- list(
+  geom_segment(
+    data = edge_df,
+    aes(x = x, y = y, xend = xend, yend = yend,
+        colour    = edge_color,
+        linewidth = abs_weight),       
+    alpha = 0.35,  show.legend = c(colour = FALSE, linewidth = TRUE)  
+  ),
+  scale_colour_identity(),
+  scale_linewidth_continuous(
+    name  = "Correlation\nstrength (|β|)",
+    range = c(0.2, 2.0),
+    guide = guide_legend(title.position = "top")
+  )
+)
+
+
+# ── Theme shared by all panels ────────────────────────────────────────────────
+net_theme <- list(
+  theme_void(base_size = 11),
+  theme(
+    plot.title      = element_text(face = "bold", hjust = 0.5, size = 13),
+    plot.subtitle   = element_text(hjust = 0.5, colour = "grey40", size = 9),
+    legend.position = "right",
+    legend.title    = element_text(size = 9, face = "bold"),
+    legend.text     = element_text(size = 8),
+    plot.margin     = margin(10, 10, 10, 10)
+  )
+)
+```
+
+***
+
+## Step 5 – Plot A: Colored by source community enriched species
+
+```{r plot-enrichment, fig.width=14, fig.height=12}
+
+# Generate the module palette
+n_modules    <- nlevels(node_df$module)
+cols <- brewer.pal(min(n_modules, 12), "Set3")
+cols[cols == "#FFFFB3"] <- "firebrick" 
+module_pal <- setNames(
+  c(cols, rep("grey70", max(0, n_modules - 12))),
+  levels(node_df$module)
+)
+
+# Module label: centroid of each module for annotation
+module_centroids <- node_df %>%
+  group_by(module) %>%
+  summarise(x = median(x), y = median(y), n = n(), .groups = "drop") %>%
+  mutate(label = paste0("M", module, "\n(n=", n, ")"))
+
+plot_A1 <- ggplot() +
+  base_edges +
+  new_scale_colour() +
+  geom_point(
+    data   = node_df,
+    aes(x = x, y = y,
+        fill   = enrichment,   # node fill = enrichment
+        colour = module,       # node border = module
+        size   = node_size),
+    shape  = 21,               # filled circle with border
+    stroke = 0.8,
+    alpha  = 0.85
+  ) +
+  scale_fill_manual(
+    values = enrich_colors,
+    name   = "Source community\nenrichment",
+    guide  = guide_legend(override.aes = list(size = 5, shape = 21, stroke = 0.8))
+  ) +
+  scale_colour_manual(
+    values = module_pal,
+    name   = "Module",
+    guide  = guide_legend(ncol = 1,
+                          override.aes = list(size = 5, shape = 21, stroke = 1.5))
+  ) +
+  scale_size_continuous(
+    name   = "Mean relative\nabundance (CLR)",
+    range  = c(2, 10),
+    breaks = c(3, 5, 8, 10),
+    labels = round(min(clr_all$rab.all) + (c(2.4, 5, 8, 10) - 2) / 8 *
+                     diff(range(clr_all$rab.all)), 1),
+    guide  = guide_legend(title.position = "top",
+                          override.aes   = list(colour = "grey50",
+                                                fill   = "grey50", alpha = 0.8))
+  ) +
+  # reset colour scale so labels use enrich colours not module colours
+  new_scale_colour() +
+  ggrepel::geom_label_repel(
+    data         = label_enrich,
+    aes(x = x, y = y, label = species, colour = enrichment),
+    size         = 2.3, fontface = "italic",
+    fill         = alpha("white", 0.7), label.size = 0.05,
+    segment.size = 0.2, segment.alpha = 0.8, segment.linetype = 1,
+    box.padding  = 0.35, max.overlaps = 40,
+    show.legend  = FALSE, inherit.aes = FALSE
+  ) +
+  scale_colour_manual(
+    values = enrich_colors,
+    guide  = "none"    # already shown via fill legend
+  ) +
+  labs(
+    title    = "A  |  Enrichment (Freshwater vs Seawater)",
+    subtitle = paste0(vcount(ig_net), " nodes  |  ", ecount(ig_net),
+                      " edges  |  gold edge = positive, teal = negative\n",
+                      "Node fill = enrichment  |  Node border = module")
+  ) +
+  net_theme
+
+plot_A1
+
+# ggsave(paste0(folder_path, "network_A_source_water_module.png"),
+#        plot_A1, width = PLOT_W, height = PLOT_H, dpi = 300, bg = "white")
+# ggsave(paste0(folder_path, "network_A_source_water_module.pdf"),
+#        plot_A1, width = PLOT_W, height = PLOT_H)
+
+plot_A2 <- ggplot() +
+  base_edges +
+   # ── re-declare linewidth scale to force legend visibility ────────────────
+  scale_linewidth_continuous(
+    name  = "Correlation\nstrength (|β|)",
+    range = c(0.2, 2.0),
+    guide = guide_legend(title.position = "top")
+  ) +
+  new_scale_colour() +
+  geom_point(
+    data   = node_df,
+    aes(x = x, y = y,
+        fill   = enrichment,   # node fill = enrichment
+        colour = module,       # node border = module
+        size   = node_size),
+    shape  = 21,               # filled circle with border
+    stroke = 0.8,
+    alpha  = 0.85
+  ) +
+  scale_fill_manual(
+    values = enrich_colors,
+    name   = "Source community\nenrichment",
+    guide  = guide_legend(override.aes = list(size = 5, shape = 21, stroke = 0.8))
+  ) +
+  scale_colour_manual(
+    values = module_pal,
+    name   = "Module",
+    guide  = guide_legend(ncol = 1,
+                          override.aes = list(size = 5, shape = 21, stroke = 1.5))
+  ) +
+  scale_size_continuous(
+    name   = "Mean relative\nabundance (CLR)",
+    range  = c(2, 10),
+    breaks = c(3, 5, 8, 10),
+    labels = round(min(clr_all$rab.all) + (c(2.4, 5, 8, 10) - 2) / 8 *
+                     diff(range(clr_all$rab.all)), 1),
+    guide  = guide_legend(title.position = "top",
+                          override.aes   = list(colour = "grey50",
+                                                fill   = "grey50", alpha = 0.8))
+  ) +
+  # reset colour scale so labels use enrich colours not module colours
+  new_scale_colour() +
+   ggrepel::geom_label_repel(
+    data        = module_centroids,
+    aes(x = x, y = y, label = label, colour = module),
+    size        = 3, fontface = "bold",
+    fill        = "white", alpha = 0.75, label.size = 0.2,
+    segment.size     = 0.2,      # line thickness (default is 0.5)
+    segment.alpha    = 0.8,      # make it more subtle
+    segment.linetype = 1,        # 1=solid, 2=dashed, 3=dotted
+    box.padding = 0.5, max.overlaps = 20,
+    show.legend = FALSE, inherit.aes = FALSE
+  ) +
+  scale_colour_manual(
+    values = module_pal,
+    name   = "Module",
+    guide  = guide_legend(
+      ncol         = 1,
+      override.aes = list(size = 5)
+    )
+  ) +
+  labs(
+    title    = "A  |  Enrichment (Freshwater vs Seawater)",
+    subtitle = paste0(vcount(ig_net), " nodes  |  ", ecount(ig_net),
+                      " edges  |  gold edge = positive, teal = negative\n",
+                      "Node fill = enrichment  |  Node border = module")
+  ) +
+  net_theme
+
+plot_A2
+
+# ggsave(paste0(folder_path, "network_A_source_water_module_no_label.png"),
+#        plot_A2, width = PLOT_W, height = PLOT_H, dpi = 300, bg = "white")
+# ggsave(paste0(folder_path, "network_A_source_water_module_no_label.pdf"),
+#        plot_A2, width = PLOT_W, height = PLOT_H)
+
+plot_A <- ggplot() +
+  base_edges +
+  new_scale_colour() +
+  geom_point(
+    data  = node_df,
+    aes(x = x, y = y, colour = enrichment, size = node_size),
+    alpha = 0.85
+  ) +
+  scale_colour_manual(
+    values = enrich_colors,
+    name   = "Enrichment",
+    guide  = guide_legend(override.aes = list(size = 5))
+  ) +
+  scale_size_continuous(
+  name   = "Mean relative\nabundance (CLR)",
+  range  = c(2, 10),
+  breaks = c(3, 5, 8, 10),
+  # back-transform scaled breaks → real rab.all values
+  labels = round(min(clr_all$rab.all) + (c(2.4, 5, 8, 10) - 2) / 8 * diff(range(clr_all$rab.all)), 1),
+  guide  = guide_legend(
+    title.position = "top",
+    override.aes   = list(colour = "grey50", alpha = 0.8))) +
+  ggrepel::geom_label_repel(
+    data         = label_enrich,
+    aes(x = x, y = y, label = species, colour = enrichment),
+    size         = 2.3, fontface = "italic",
+    fill         = alpha("white", 0.7), label.size = 0.05,
+    segment.size     = 0.2,      # line thickness (default is 0.5)
+    segment.alpha    = 0.8,      # make it more subtle
+    segment.linetype = 1,        # 1=solid, 2=dashed, 3=dotted
+    box.padding  = 0.35, max.overlaps = 40,
+    show.legend  = FALSE, inherit.aes = FALSE
+  ) +
+  labs(title    = "A  |  Enrichment (Freshwater vs Seawater)",
+       subtitle = paste0(vcount(ig_net), " nodes  |  ", ecount(ig_net),
+                         " edges  |  blue edge = positive, orange = negative")) +
+  net_theme
+
+plot_A
+
+# ggsave(paste0(folder_path, "network_A_source_water.png"),
+#        plot_A, width = PLOT_W, height = PLOT_H, dpi = 300, bg = "white")
+# ggsave(paste0(folder_path, "network_A_source_water.pdf"),
+#        plot_A, width = PLOT_W, height = PLOT_H)
+```
+
+***
+
+## Step 6 – Plot B: Colored by module membership
+
+```{r plot-modules, fig.width=14, fig.height=12}
+
+plot_B <- ggplot() +
+  base_edges +
+  new_scale_colour() +
+  geom_point(
+    data  = node_df,
+    aes(x = x, y = y, colour = module, size = node_size),
+    alpha = 0.85
+  ) +
+  scale_colour_manual(
+    values = module_pal,
+    name   = "Module",
+    guide  = guide_legend(
+      ncol         = 1,
+      override.aes = list(size = 5)
+    )
+  ) +
+  scale_size_continuous(
+  name   = "Mean relative\nabundance (CLR)",
+  range  = c(2, 10),
+  breaks = c(3, 5, 8, 10),
+  # back-transform scaled breaks → real rab.all values
+  labels = round(min(clr_all$rab.all) + (c(2.4, 5, 8, 10) - 2) / 8 * diff(range(clr_all$rab.all)), 1),
+  guide  = guide_legend(
+    title.position = "top",
+    override.aes   = list(colour = "grey50", alpha = 0.8))) +
+  # module centroid labels
+  ggrepel::geom_label_repel(
+    data        = module_centroids,
+    aes(x = x, y = y, label = label, colour = module),
+    size        = 3, fontface = "bold",
+    fill        = alpha("white", 0.75), label.size = 0.2,
+    segment.size     = 0.2,      # line thickness (default is 0.5)
+    segment.alpha    = 0.8,      # make it more subtle
+    segment.linetype = 1,        # 1=solid, 2=dashed, 3=dotted
+    box.padding = 0.5, max.overlaps = 20,
+    show.legend = FALSE, inherit.aes = FALSE
+  ) +
+  labs(title    = "B  |  Module membership (Louvain)",
+       subtitle = paste0(n_modules, " modules detected")) +
+  net_theme
+
+plot_B
+
+# ggsave(paste0(folder_path, "network_B_modules.png"),
+#        plot_B, width = PLOT_W, height = PLOT_H, dpi = 300, bg = "white")
+# ggsave(paste0(folder_path, "network_B_modules.pdf"),
+#        plot_B, width = PLOT_W, height = PLOT_H)
+```
+
+***
+
+## Step 7 – Plot C:  Colored by family
+
+```{r plot-family, fig.width=14, fig.height=12}
+# ── Collapse rare phyla into "Other" to keep legend readable ─────────────────
+family_counts <- node_df %>% count(family, sort = TRUE)
+top_phyla     <- family_counts %>% filter(n >= 5) %>% pull(family)  # ≥5 species
+
+node_df <- node_df %>%
+  mutate(family_plot = ifelse(family %in% top_phyla, family, "Other (< 5 spp)"))
+
+n_phyla    <- length(unique(node_df$family_plot))
+
+num_colors_needed <- length(sort(setdiff(unique(node_df$family_plot), "Other (< 5 spp)")))
+paired_extender <- colorRampPalette(brewer.pal(12, "Paired"))
+
+family_colors <- c(paired_extender(num_colors_needed), "grey80")
+family_pal <- setNames(
+  family_colors,
+  c(sort(setdiff(unique(node_df$family_plot), "Other (< 5 spp)")), "Other (< 5 spp)")
+)
+
+# Define level order: sorted named families first, Other last
+family_levels <- c(
+  sort(setdiff(unique(node_df$family_plot), "Other (< 5 spp)")),
+  "Other (< 5 spp)"
+)
+
+# Apply to node_df and label_family
+node_df <- node_df %>%
+  mutate(family_plot = factor(family_plot, levels = family_levels))
+
+# Label only enriched species, coloured by family
+label_family <- node_df %>%
+  filter(enrichment != "Not significant") %>%
+  dplyr::select(x, y, species, family_plot)
+
+
+plot_C <- ggplot() +
+  base_edges +
+  new_scale_colour() +
+  geom_point(
+    data  = node_df,
+    aes(x = x, y = y, colour = family_plot, size = node_size),
+    alpha = 0.85
+  ) +
+  scale_colour_manual(
+    values = family_pal,
+    name   = "family",
+    guide  = guide_legend(
+      ncol         = 1,
+      override.aes = list(size = 5)
+    )
+  ) +
+  scale_size_continuous(
+  name   = "Mean relative\nabundance (CLR)",
+  range  = c(2, 10),
+  breaks = c(3, 5, 8, 10),
+  # back-transform scaled breaks → real rab.all values
+  labels = round(min(clr_all$rab.all) + (c(2.4, 5, 8, 10) - 2) / 8 * diff(range(clr_all$rab.all)), 1),
+  guide  = guide_legend(
+    title.position = "top",
+    override.aes   = list(colour = "grey50", alpha = 0.8))) +
+  ggrepel::geom_label_repel(
+    data         = label_family,
+    aes(x = x, y = y, label = species, colour = family_plot),
+    size         = 2.3, fontface = "italic",
+    fill         = alpha("white", 0.7), label.size = 0.15,
+    box.padding  = 0.35, max.overlaps = 40,
+    segment.size     = 0.2,      # line thickness (default is 0.5)
+    segment.alpha    = 0.8,      # make it more subtle
+    segment.linetype = 1,        # 1=solid, 2=dashed, 3=dotted
+    show.legend  = FALSE, inherit.aes = FALSE
+  ) +
+  labs(title    = "C  |  Family",
+       subtitle = "Labels = significantly enriched species") +
+  net_theme
+
+plot_C
+
+# ggsave(paste0(folder_path, "network_C_family.pdf"), 
+#        plot_C, width = PLOT_W, height = PLOT_H)
+# ggsave(paste0(folder_path, "network_C_family.png"), 
+#        plot_C, width = PLOT_W, height = PLOT_H, dpi = 300, bg = "white")
+```
+
+***
+
+## Step 8 – Plot D Network highlighting negative interactions
+
+```{r plot-D, fig.width=9, fig.height=6}
+# ── Build enrichment pairing for every edge ───────────────────────────────────
+edge_df_annotated <- edge_df %>%
+  left_join(node_df %>% dplyr::select(species, enrichment),
+            by = c("from" = "species")) %>%
+  dplyr::rename(enrich_from = enrichment) %>%
+  left_join(node_df %>% dplyr::select(species, enrichment),
+            by = c("to" = "species")) %>%
+  dplyr::rename(enrich_to = enrichment) %>%
+  mutate(
+    weight      = E(ig_net)$weight,
+    abs_weight  = abs(weight),
+    sign        = ifelse(weight > 0, "Positive", "Negative"),
+    enrich_pair = case_when(
+      enrich_from == "Freshwater" & enrich_to == "Freshwater" ~ "FW-FW",
+      enrich_from == "Seawater"   & enrich_to == "Seawater"   ~ "SW-SW",
+      (enrich_from == "Freshwater" & enrich_to == "Seawater") |
+        (enrich_from == "Seawater" & enrich_to == "Freshwater") ~ "FW-SW",
+      TRUE ~ "Other"
+    ),
+    display = case_when(
+      sign == "Negative" & enrich_pair == "FW-SW" ~ "Neg: FW-SW",
+      sign == "Negative" & enrich_pair == "FW-FW" ~ "Neg: FW-FW",
+      sign == "Negative" & enrich_pair == "SW-SW" ~ "Neg: SW-SW",
+      sign == "Negative"                           ~ "Neg: Other",
+      TRUE                                          ~ "Positive"
+    )
+  )
+
+head(edge_df_annotated)
+
+df <- edge_df_annotated %>% 
+  select(-c(x, y, xend, yend, edge_color, abs_weight, weight, display)) %>% 
+  filter(enrich_pair != "Other")
+head(df)
+str(df)
+write.csv(df, paste0(folder_path, "Significant_associations_between_freshwater_and_seawater_species.csv"))
+
+edges_pos <- edge_df_annotated %>% filter(display == "Positive")
+edges_neg <- edge_df_annotated %>% filter(str_starts(display, "Neg"))
+
+
+# ── Species with negative interactions involving enriched species only ─────────
+# ── Labels: enriched species involved in FW-SW negative edges only ────────────
+neg_with_enriched <- union(
+  edges_neg %>%
+    filter(enrich_pair == "FW-SW") %>%
+    pull(from),
+  edges_neg %>%
+    filter(enrich_pair == "FW-SW")  %>%
+    pull(to)
+)
+
+label_neg_enriched <- node_df %>%
+  filter(species %in% neg_with_enriched,
+         enrichment != "Not significant") %>%   # ← enriched only
+  dplyr::select(x, y, species, enrichment)
+
+
+# ── Plot D ────────────────────────────────────────────────────────────────────
+plot_D <- ggplot() +
+  # Layer 1: positive edges — keep colour and width, but very transparent
+  geom_segment(
+    data      = edges_pos,
+    aes(x = x, y = y, xend = xend, yend = yend,
+        linewidth = abs_weight),
+    colour    = "#d8b365",    # same gold as base_edges
+    alpha     = 0.10,         # very faint — recedes to background
+  ) +
+
+  # Layer 2: negative edges among non-enriched pairs — colour + width, subtle
+  geom_segment(
+    data  = edges_neg %>% filter(display == "Neg: Other"),
+    aes(x = x, y = y, xend = xend, yend = yend,
+        linewidth = abs_weight),
+    colour = "#5ab4ac",       # lightest teal
+    alpha  = 0.10
+  ) +
+
+  # Layer 3: negative FW-FW and SW-SW — visible but not dominant
+  geom_segment(
+    data  = edges_neg %>% filter(display %in% c("Neg: FW-FW", "Neg: SW-SW")),
+    aes(x = x, y = y, xend = xend, yend = yend,
+        colour    = display,
+        linewidth = abs_weight),
+    alpha = 0.40
+  ) +
+
+  # Layer 4: FW-SW negative — full opacity, bold on top
+  geom_segment(
+    data  = edges_neg %>% filter(display == "Neg: FW-SW"),
+    aes(x = x, y = y, xend = xend, yend = yend,
+        linewidth = abs_weight),
+    colour = "#01665e",       # darkest teal
+    alpha  = 0.60
+  ) +
+
+  scale_colour_manual(
+    values = c("Neg: FW-FW" = "#35978f",
+               "Neg: SW-SW" = "#80cdc1"),
+    name   = "Negative interaction\npairing",
+    guide  = guide_legend(override.aes = list(linewidth = 1.5))
+  ) +
+  
+  scale_linewidth_continuous(
+    name  = "Correlation\nstrength (|β|)",
+    range = c(0.2, 2.0),
+    guide = guide_legend(title.position = "top")
+  ) +
+
+  # Layer 5: nodes — shape 21: fill = source enrichment, colour = module border
+  new_scale_colour() +
+  geom_point(
+    data  = node_df,
+    aes(x = x, y = y,
+        fill   = enrichment,    # enrichment from source community
+        colour = module,        # module as node border colour
+        size   = node_size),
+    shape = 21,                 # filled circle with border
+    stroke = 0.8,               # border thickness
+    alpha  = 0.90
+  ) +
+  scale_fill_manual(
+    values = enrich_colors,
+    name   = "Source community\nenrichment",
+    guide  = guide_legend(
+      override.aes = list(size = 5, shape = 21, stroke = 0.8)
+    )
+  ) +
+  scale_colour_manual(
+    values = module_pal,
+    name   = "Module",
+    guide  = guide_legend(
+      ncol         = 1,
+      override.aes = list(size = 5, shape = 21, stroke = 1.5)
+    )
+  ) +
+  scale_size_continuous(
+    name   = "Mean relative\nabundance (CLR)",
+    range  = c(2, 10),
+    breaks = c(3, 5, 8, 10),
+    labels = round(
+      min(clr_all$rab.all) + (c(2.4, 5, 8, 10) - 2) / 8 *
+        diff(range(clr_all$rab.all)), 1),
+    guide  = guide_legend(
+      title.position = "top",
+      override.aes   = list(colour = "grey50", fill = "grey50", alpha = 0.8)
+    )
+  ) +
+
+  # Layer 6: label only species with negative interactions, and coloured by enrichment
+  # — resets colour scale so geom_label_repel uses enrich colours ──
+  new_scale_colour() +
+  ggrepel::geom_label_repel(
+    data         = label_neg_enriched,
+    aes(x = x, y = y, label = species, colour = enrichment),
+    size         = 2.3, fontface = "italic",
+    fill         = alpha("white", 0.7), label.size = 0.05,
+    segment.size = 0.2, segment.alpha = 0.8, segment.linetype = 1,
+    box.padding  = 0.35, max.overlaps = 40,
+    show.legend  = FALSE, inherit.aes = FALSE
+  ) +
+  # define enrichment colours for the label layer 
+  scale_colour_manual(
+  values = enrich_colors,
+  guide  = "none"
+) +
+
+  labs(
+    title    = "D  |  Negative interactions highlighted",
+    subtitle = paste0(
+      nrow(edges_neg), " negative edges  |  ",
+      nrow(edges_neg %>% filter(display == "Neg: FW-SW")),
+      " cross-watertype (FW↔SW) in darkest teal\n",
+      "Node fill = source enrichment  |  ",
+      "Node border = module  |  ",
+      "Line width = |β|"
+    )
+  ) +
+  net_theme
+
+plot_D
+
+# ggsave(paste0(folder_path, "network_D_negative_interactions.pdf"), plot_D, width = PLOT_W, height = PLOT_H)
+# ggsave(paste0(folder_path, "network_D_negative_interactions.png"),
+#        plot_D, width = PLOT_W, height = PLOT_H, dpi = 300, bg = "white")
+```
+
+***
+
+## Step 9 – Plot E Network only show negative interactions
+
+```{r plot-E, fig.width=9, fig.height=6}
+# ── Plot E: FW-SW negative edges only ────────────────────────────────────────
+fw_sw_neg_nodes <- node_df %>%
+  filter(species %in% c(
+    edges_neg %>% filter(display == "Neg: FW-SW") %>% pull(from),
+    edges_neg %>% filter(display == "Neg: FW-SW") %>% pull(to)
+  ))
+
+fw_sw_neg_edges <- edges_neg %>% filter(display == "Neg: FW-SW")
+
+plot_E <- ggplot() +
+  # ── ADD: all other edges super transparent ────────────────────────────────
+
+  # Layer 1: positive edges — gold, very faint
+  geom_segment(
+    data      = edges_pos,
+    aes(x = x, y = y, xend = xend, yend = yend, linewidth = abs_weight),
+    colour    = "#d8b365", alpha = 0.05
+  ) +
+
+  # Layer 2: negative non-enriched edges — lightest teal, very faint
+  geom_segment(
+    data   = edges_neg %>% filter(display == "Neg: Other"),
+    aes(x = x, y = y, xend = xend, yend = yend, linewidth = abs_weight),
+    colour = "#c7eae5", alpha = 0.05
+  ) +
+
+  # Layer 3: FW-FW and SW-SW negative — slightly more visible
+  geom_segment(
+    data  = edges_neg %>% filter(display %in% c("Neg: FW-FW", "Neg: SW-SW")),
+    aes(x = x, y = y, xend = xend, yend = yend, linewidth = abs_weight),
+    colour = "#80cdc1", alpha = 0.05
+  ) +
+  
+  # Layer 4: background nodes — non-involved, faded
+  geom_point(
+    data    = node_df %>% filter(!species %in% fw_sw_neg_nodes$species),
+    aes(x = x, y = y, size = node_size),
+    colour  = "lightgray", alpha = 0.6
+  ) +
+  
+  # ── focus layers ───────────────────────────────────────────────────
+
+  # Layer 5: FW-SW negative edges — full emphasis
+  geom_segment(
+    data      = fw_sw_neg_edges,
+    aes(x = x, y = y, xend = xend, yend = yend, linewidth = abs_weight),
+    colour    = "#01665e", alpha = 0.90
+  ) +
+  scale_linewidth_continuous(
+    name  = "Correlation\nstrength (|β|)",
+    range = c(0.2, 2.0),
+    guide = guide_legend(title.position = "top")
+  ) +
+
+  # Layer 6: involved nodes on top
+  new_scale_colour() +
+  geom_point(
+    data   = fw_sw_neg_nodes,
+    aes(x = x, y = y, fill = enrichment, size = node_size),
+    shape  = 21, stroke = 0.8, alpha = 0.95, colour = "grey30"
+  ) +
+  scale_fill_manual(
+  values = enrich_colors,
+  name   = "Source community\nenrichment",
+  guide  = guide_legend(override.aes = list(size = 5, shape = 21, stroke = 0.8))
+) +
+  scale_size_continuous(
+    name   = "Mean relative\nabundance (CLR)",
+    range  = c(2, 10),
+    breaks = c(3, 5, 8, 10),
+    labels = round(
+      min(clr_all$rab.all) + (c(2.4, 5, 8, 10) - 2) / 8 *
+        diff(range(clr_all$rab.all)), 1),
+    guide  = guide_legend(title.position = "top",
+                          override.aes = list(colour = "grey50",
+                                              fill   = "grey50", alpha = 0.8))
+  ) +
+
+  # Layer 7: labels
+  ggrepel::geom_label_repel(
+    data         = fw_sw_neg_nodes,
+    aes(x = x, y = y, label = species, colour = enrichment),
+    size         = 2.5, fontface = "italic",
+    fill         = "white", alpha = 0.7, label.size = 0.05,
+    segment.size = 0.2, segment.alpha = 0.8, segment.linetype = 1,
+    box.padding  = 0.35, max.overlaps = 40,
+    show.legend  = FALSE, inherit.aes = FALSE
+  ) +
+  scale_colour_manual(
+  values = enrich_colors,
+  guide  = "none"
+) +
+  labs(
+    title    = "E  |  FW ↔ SW negative interactions only",
+    subtitle = paste0(
+      nrow(fw_sw_neg_edges), " negative edges  |  ",
+      length(unique(fw_sw_neg_nodes$species)), " species involved"
+    )
+  ) +
+  net_theme
+
+plot_E
+
+# ggsave(paste0(folder_path, "network_E_FW_SW_negative.pdf"),
+#        plot_E, width = PLOT_W, height = PLOT_H)
+# ggsave(paste0(folder_path, "network_E_FW_SW_negative.png"),
+#        plot_E, width = PLOT_W, height = PLOT_H, dpi = 300, bg = "white")
+
+
+# ── Chord diagram: FW vs SW negative interactions ─────────────────────────────
+# Build matrix: rows = FW species, cols = SW species, value = |weight|
+fw_species <- fw_sw_neg_nodes %>% filter(enrichment == "Freshwater") %>% pull(species)
+sw_species <- fw_sw_neg_nodes %>% filter(enrichment == "Seawater")   %>% pull(species)
+
+chord_df <- fw_sw_neg_edges %>%
+  filter(from %in% c(fw_species, sw_species),
+         to   %in% c(fw_species, sw_species)) %>%
+  dplyr::select(from, to, abs_weight)
+
+# assign colours per species group
+chord_colors <- c(
+  setNames(rep("#2166ac", length(fw_species)), fw_species),
+  setNames(rep("#d6604d", length(sw_species)), sw_species)
+)
+
+pdf(paste0(folder_path, "network_E_chord_FW_SW_negative.pdf"),
+    width = 6, height = 6)
+circos.clear()
+chordDiagram(
+  chord_df,
+  grid.col       = chord_colors,
+  transparency   = 0.4,
+  annotationTrack = "grid",
+  preAllocateTracks = list(track.height = 0.08)
+)
+circos.trackPlotRegion(
+  track.index = 1,
+  panel.fun   = function(x, y) {
+    circos.text(CELL_META$xcenter, CELL_META$ylim[1],
+                CELL_META$sector.index,
+                facing = "clockwise", niceFacing = TRUE,
+                adj = c(0, 0.5), cex = 0.4, font = 3)
+  },
+  bg.border = NA
+)
+dev.off()
+
+```
+
+***
+
+## Step 10 – Combine all three at identical dimensions
+
+*Same `width` and `height` for every file = perfect overlay in PowerPoint.*
+
+```{r save-all}
+# ── Fix axis limits — same for ALL four plots ─────────────────────────────────
+x_range    <- range(node_df$x) * 1.1
+y_range    <- range(node_df$y) * 1.1
+coord_fix  <- coord_cartesian(xlim = x_range, ylim = y_range)
+
+plot_A2 <- plot_A + coord_fix
+plot_B2 <- plot_B + coord_fix
+plot_C2 <- plot_C + coord_fix
+plot_D2 <- plot_D + coord_fix
+
+# ── 2×2 combined panel ────────────────────────────────────────────────────────
+combined_2x2 <- (plot_A2 | plot_B2) / (plot_C2 | plot_D2) +
+  plot_annotation(
+    title   = "Co-occurrence network – SpiecEasi (MB, bstars)",
+    caption = paste0("Node size = mean CLR abundance  |  ",
+                     "Gold edge = positive  |  Teal edge = negative"),
+    theme   = theme(
+      plot.title   = element_text(face = "bold", hjust = 0.5, size = 16),
+      plot.caption = element_text(colour = "grey50", size = 9)
+    )
+  )
+
+
+# ggsave(paste0(folder_path, "network_ABCD_2x2.pdf"),
+#        combined_2x2,
+#        width  = PLOT_W * 2,
+#        height = PLOT_H * 2)
+# 
+# ggsave(paste0(folder_path, "network_ABCD_2x2.png"),
+#        combined_2x2,
+#        width  = PLOT_W * 2,
+#        height = PLOT_H * 2,
+#        dpi    = 200, bg = "white")
+
+# ── Vertical stack A/B/C/D ────────────────────────────────────────────────────
+combined_vertical <- plot_A2 / plot_B2 / plot_C2 / plot_D2 +
+  plot_layout(ncol = 1) +
+  plot_annotation(
+    title   = "Co-occurrence network – SpiecEasi (MB, bstars)",
+    caption = paste0("Node size = mean CLR abundance  |  ",
+                     "Gold edge = positive  |  Teal edge = negative"),
+    theme   = theme(
+      plot.title   = element_text(face = "bold", hjust = 0.5, size = 16),
+      plot.caption = element_text(colour = "grey50", size = 9)
+    )
+  )
+
+# ggsave(paste0(folder_path, "network_ABCD_vertical.pdf"),
+#        combined_vertical,
+#        width  = PLOT_W,
+#        height = PLOT_H * 4)
+
+message("All combined figures saved to ", folder_path)
+```
+
+***
+
+## Step 11 – Summary table of nodes from source communities
+
+```{r summary-table}
+
+node_detail <- node_df %>%
+  filter(enrichment != "Not significant") %>%
+  # module already in node_df — no need for left_join again
+  dplyr::select(species, phylum, family, module, enrichment, clr_abund, node_size) %>%
+  arrange(enrichment, family, desc(clr_abund)) %>%
+  knitr::kable(
+    digits    = 2,
+    col.names = c("Species", "Phylum", "Family",
+                  "Module", "Enrichment", "CLR abundance", "Node size (scaled)"),
+    caption   = "Significantly enriched species with taxonomy and module membership"
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = FALSE,
+    font_size         = 12
+  ) %>%
+  kableExtra::column_spec(1, italic = TRUE) %>%
+  kableExtra::pack_rows(
+    index = table(
+      dplyr::arrange(
+        filter(node_df, enrichment != "Not significant"),
+        enrichment, phylum
+      )$enrichment
+    )
+  )
+
+node_detail
+```
+
+***
+
+## Step 12 – Degree & interaction analysis
+
+```{r interaction-analysis, fig.width=10, fig.height=7}
+
+# ── 1. Basic degree statistics ────────────────────────────────────────────────
+# Degree = total number of co-occurrence connections per species
+# High degree = hub species (keystone-like, highly connected)
+# Low degree  = peripheral species (few interactions)
+
+degree_df <- data.frame(
+  species    = V(ig_net)$name,
+  degree     = igraph::degree(ig_net)
+  # degree_pos = igraph::degree(ig_net, mode = "all") # placeholder — split below
+  ) %>% 
+  left_join(node_df %>% dplyr::select(species, enrichment, module, family, phylum),
+            by = "species")
+
+# Count positive and negative edges per node separately
+# ── Positive degree ───────────────────────────────────────────────────────────
+pos_sub    <- igraph::subgraph.edges(ig_net, eids = which(E(ig_net)$weight > 0))
+pos_deg    <- igraph::degree(pos_sub)   # only nodes with ≥1 positive edge
+
+pos_degree <- data.frame(
+  species = V(ig_net)$name,
+  deg_pos = pos_deg[V(ig_net)$name]    # match by name → missing = NA
+) %>%
+  mutate(deg_pos = ifelse(is.na(deg_pos), 0L, deg_pos))   # NA → 0
+
+# ── Negative degree ───────────────────────────────────────────────────────────
+neg_sub    <- igraph::subgraph.edges(ig_net, eids = which(E(ig_net)$weight < 0))
+neg_deg    <- igraph::degree(neg_sub)
+
+neg_degree <- data.frame(
+  species = V(ig_net)$name,
+  deg_neg = neg_deg[V(ig_net)$name]
+) %>%
+  mutate(deg_neg = ifelse(is.na(deg_neg), 0L, deg_neg))
+
+# ── Sanity check ──────────────────────────────────────────────────────────────
+cat("Species with zero positive edges:", sum(pos_degree$deg_pos == 0), "\n")
+cat("Species with zero negative edges:", sum(neg_degree$deg_neg == 0), "\n")
+
+
+degree_df <- degree_df %>%
+  left_join(pos_degree, by = "species") %>%
+  left_join(neg_degree, by = "species") %>%
+  mutate(
+    deg_total  = deg_pos + deg_neg,
+    pct_pos    = round(100 * deg_pos / deg_total, 1),
+    pct_neg    = round(100 * deg_neg / deg_total, 1)
+  ) 
+
+cat("── Network-wide degree summary ──\n")
+cat("Total edges:    ", ecount(ig_net), "\n")
+cat("Positive edges: ", sum(E(ig_net)$weight > 0),
+    sprintf("(%.1f%%)", 100 * mean(E(ig_net)$weight > 0)), "\n")
+cat("Negative edges: ", sum(E(ig_net)$weight < 0),
+    sprintf("(%.1f%%)", 100 * mean(E(ig_net)$weight < 0)), "\n")
+cat("Mean degree:    ", round(mean(degree_df$deg_total), 1), "\n")
+cat("Max degree:     ", max(degree_df$deg_total),
+    "–", degree_df$species[which.max(degree_df$deg_total)], "\n")
+head(degree_df)
+
+# ── 2. Summary 1: within- and among-module interactions ──────────────────────
+# Annotate every edge with source and target module
+edge_module_df <- as.data.frame(get.edgelist(ig_net)) %>%
+  setNames(c("from", "to")) %>%
+  mutate(
+    weight      = E(ig_net)$weight,
+    edge_type   = ifelse(weight > 0, "Positive", "Negative"),
+    module_from = node_df$module[match(from, node_df$species)],
+    module_to   = node_df$module[match(to,   node_df$species)],
+    interaction = ifelse(as.character(module_from) == as.character(module_to),
+                         "Within-module", "Among-module")
+  )
+
+# Per-module within/among × positive/negative counts
+module_summary <- edge_module_df %>%
+  group_by(module_from, interaction, edge_type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pivot_wider(names_from = edge_type, values_from = n, values_fill = 0) %>%
+  mutate(
+    total   = Positive + Negative,
+    pct_pos = round(100 * Positive / total, 1),
+    pct_neg = round(100 * Negative / total, 1)
+  ) %>%
+  dplyr::rename(module = module_from) %>%
+  arrange(module, interaction)
+
+cat("\n── Summary 1: within vs among module interactions ──\n")
+print(module_summary)
+
+# Plot 1: stacked bar per module × within/among
+p1 <- module_summary %>%
+  pivot_longer(cols = c(Positive, Negative),
+               names_to = "edge_type", values_to = "n") %>%
+  mutate(module = paste0("M", module)) %>%
+  ggplot(aes(x = interaction, y = n, fill = edge_type)) +
+  geom_col(position = "stack", alpha = 0.85) +
+  geom_text(aes(label = n),
+            position = position_stack(vjust = 0.5),
+            size = 3, colour = "white", fontface = "bold") +
+  facet_wrap(~ module, nrow = 1) +
+  scale_fill_manual(
+    values = c("Positive" = "#d8b365", "Negative" = "#5ab4ac"),
+    name   = "Interaction type"
+  ) +
+  labs(
+    title = "1  |  Within- vs among-module interactions",
+    x     = NULL,
+    y     = "Number of edges"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title   = element_text(face = "bold", hjust = 0.5),
+    axis.text.x  = element_text(angle = 25, hjust = 1),
+    strip.text   = element_text(face = "bold")
+  )
+
+# ── 3. Summary 2: interactions among enrichment groups ───────────────────────
+# Classify each edge by the enrichment status of its two endpoints
+edge_enrich_df <- edge_module_df %>%
+  mutate(
+    enrich_from = node_df$enrichment[match(from, node_df$species)],
+    enrich_to   = node_df$enrichment[match(to,   node_df$species)],
+    # Order pair alphabetically so FW-SW == SW-FW
+    enrich_pair = paste(
+      pmin(as.character(enrich_from), as.character(enrich_to)),
+      pmax(as.character(enrich_from), as.character(enrich_to)),
+      sep = " ↔ "
+    )
+  )
+
+enrich_summary2 <- edge_enrich_df %>%
+  group_by(enrich_pair, edge_type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pivot_wider(names_from = edge_type, values_from = n, values_fill = 0) %>%
+  mutate(
+    total   = Positive + Negative,
+    pct_pos = round(100 * Positive / total, 1),
+    pct_neg = round(100 * Negative / total, 1)
+  ) %>%
+  arrange(desc(total))
+
+cat("\n── Summary 2: interactions by enrichment pairing ──\n")
+print(enrich_summary2)
+
+# Plot 2: stacked bar per enrichment pairing
+p2 <- enrich_summary2 %>%
+  pivot_longer(cols = c(Positive, Negative),
+               names_to = "edge_type", values_to = "n") %>%
+  mutate(enrich_pair = str_wrap(enrich_pair, width = 20)) %>%
+  ggplot(aes(x = reorder(enrich_pair, -n), y = n, fill = edge_type)) +
+  geom_col(position = "stack", alpha = 0.85) +
+  geom_text(aes(label = paste0(n, "\n(", round(n / sum(n) * 100), "%)")),
+            position = position_stack(vjust = 0.5),
+            size = 2.8, colour = "white", fontface = "bold") +
+  scale_fill_manual(
+    values = c("Positive" = "#d8b365", "Negative" = "#5ab4ac"),
+    name   = "Interaction type"
+  ) +
+  labs(
+    title = "2  |  Interactions by enrichment group pairing",
+    x     = NULL,
+    y     = "Number of edges"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title  = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 25, hjust = 1, size = 8)
+  )
+
+# ── 4. Heatmap: % positive interactions — module × enrichment pairing ─────────
+heat_df <- edge_enrich_df %>%
+  mutate(module_from = paste0("M", module_from)) %>%
+  group_by(module_from, enrich_pair, edge_type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pivot_wider(names_from = edge_type, values_from = n, values_fill = 0) %>%
+  mutate(
+    total   = Positive + Negative,
+    pct_pos = round(100 * Positive / total, 1)
+  ) %>%
+  filter(total >= 3)    # remove cells with too few edges to be meaningful
+
+p3 <- heat_df %>%
+  mutate(enrich_pair = str_wrap(enrich_pair, width = 18)) %>%
+  ggplot(aes(x = enrich_pair, y = module_from, fill = pct_pos)) +
+  geom_tile(colour = "white", linewidth = 0.6) +
+  geom_text(aes(label = paste0(pct_pos, "%\n(n=", total, ")")),
+            size = 2.8, colour = "grey20") +
+  scale_fill_gradient2(
+    low      = "#5ab4ac",
+    mid      = "white",
+    high     = "#d8b365",
+    midpoint = 50,
+    name     = "% positive\ninteractions"
+  ) +
+  labs(
+    title = "3  |  % positive interactions — module × enrichment pairing",
+    x     = NULL,
+    y     = "Module"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title  = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 8)
+  )
+
+p3 <- heat_df %>%
+  mutate(
+    enrich_pair = str_replace_all(enrich_pair, "\u2194", "-")) %>%
+  ggplot(aes(x = enrich_pair, y = module_from, fill = pct_pos)) +
+  geom_tile(colour = "white", linewidth = 0.6) +
+  geom_text(aes(label = paste0(pct_pos, "%\n(n=", total, ")")),
+            size = 2.8, colour = "grey20") +
+  scale_fill_gradient2(
+    low      = "#5ab4ac",
+    mid      = "white",
+    high     = "#d8b365",
+    midpoint = 50,
+    name     = "% positive\ninteractions"
+  ) +
+  labs(
+    title = "3  |  % positive interactions - module x enrichment pairing",
+    x     = NULL,
+    y     = "Module"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title  = element_text(face = "bold", hjust = 0.5),
+    # three lines horizontal 
+    # axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 1, size = 7, lineheight = 0.9),
+    # one line vertical — comment out A and uncomment this 
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8)
+  )
+
+# ggsave(paste0(folder_path, "network_degree_interaction_within_between_source.pdf"), p3, width = 4.5, height = 4.2)
+
+# ── 5. Top hub species ────────────────────────────────────────────────────────
+# prepare data once, reuse in both geom layers
+hub_df <- degree_df %>%
+  slice_max(deg_total, n = 20) %>%
+  mutate(species = fct_reorder(species, deg_total))
+
+p4 <- hub_df %>%
+  pivot_longer(cols = c(deg_pos, deg_neg),
+               names_to  = "type",
+               values_to = "deg") %>%
+  mutate(type = ifelse(type == "deg_pos", "Positive", "Negative")) %>%
+  ggplot(aes(x = deg, y = species, fill = type)) +
+  geom_col(position = "stack", alpha = 0.85) +
+  geom_text(aes(label = deg),
+            position    = position_stack(vjust = 0.5),
+            size        = 2.8, colour = "white", fontface = "bold") +
+  # coloured species name labels on the left
+  geom_text(
+    data        = hub_df,                               # ← clean separate data
+    aes(x = -0.3, y = species,
+        label   = species,
+        colour  = enrichment),
+    hjust       = 1,
+    size        = 2.8,
+    fontface    = "italic",
+    inherit.aes = FALSE
+  ) +
+  scale_fill_manual(
+    values = c("Positive" = "#d8b365", "Negative" = "#5ab4ac"),
+    name   = "Interaction type"
+  ) +
+  scale_colour_manual(
+    values = c("Freshwater"      = "#2166ac",
+               "Seawater"        = "#d6604d",
+               "Not significant" = "grey40"),
+    name   = "Enrichment"
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.4, 0.05))) +
+  labs(
+    title = "4  |  Top 20 hub species by degree",
+    x     = "Degree (number of connections)",
+    y     = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title  = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_blank()    # hidden — replaced by coloured geom_text
+  )
+
+p4
+
+
+# ── Combine all four panels ───────────────────────────────────────────────────
+(p1 + p2) / (p3 + p4) +
+  plot_annotation(
+    title   = "Co-occurrence network — degree & interaction analysis",
+    caption = paste0(
+      "Positive interaction (gold) = co-occurrence  |  ",
+      "Negative interaction (teal) = mutual exclusion\n",
+      "SpiecEasi MB method, bstars selection, ", vcount(ig_net), " taxa, ",
+      ecount(ig_net), " edges"
+    ),
+    theme = theme(
+      plot.title   = element_text(face = "bold", hjust = 0.5, size = 15),
+      plot.caption = element_text(colour = "grey50", size = 8)
+    )
+  )
+
+# ggsave(paste0(folder_path, "network_degree_interaction_summary.pdf"),
+#        width = 14, height = 10)
+```
+
+
+***
+
+## Step 13 – Show species with negative interactions
+
+```{r interaction-summary, fig.width=10, fig.height=7}
+
+# ── Annotate every negative edge with enrichment of both endpoints ────────────
+neg_enrich_df <- as.data.frame(get.edgelist(ig_net)) %>%
+  setNames(c("from", "to")) %>%
+  mutate(weight = E(ig_net)$weight) %>%
+  filter(weight < 0) %>%
+  left_join(node_df %>% dplyr::select(species, enrichment, module, family),
+            by = c("from" = "species")) %>%
+  dplyr::rename(enrich_from = enrichment, module_from = module, family_from = family) %>%
+  left_join(node_df %>% dplyr::select(species, enrichment, module, family),
+            by = c("to" = "species")) %>%
+  dplyr::rename(enrich_to = enrichment, module_to = module, family_to = family) %>%
+  mutate(
+    pair_type = paste(
+      pmin(as.character(enrich_from), as.character(enrich_to)),
+      pmax(as.character(enrich_from), as.character(enrich_to)),
+      sep = " ↔ "
+    )
+  )
+
+# ── Summary table: which FW and SW species have the most negative interactions──
+neg_species_summary <- bind_rows(
+  neg_enrich_df %>%
+    filter(enrich_from %in% c("Freshwater", "Seawater")) %>%
+    dplyr::select(species = from, enrichment = enrich_from,
+                  partner = to, partner_enrichment = enrich_to,
+                  module = module_from, family = family_from),
+  neg_enrich_df %>%
+    filter(enrich_to %in% c("Freshwater", "Seawater")) %>%
+    dplyr::select(species = to, enrichment = enrich_to,
+                  partner = from, partner_enrichment = enrich_from,
+                  module = module_to, family = family_to)
+) %>%
+  distinct() %>%
+  group_by(species, enrichment, module, family) %>%
+  summarise(
+    n_neg_total   = n(),
+    n_neg_vs_FW   = sum(partner_enrichment == "Freshwater"),
+    n_neg_vs_SW   = sum(partner_enrichment == "Seawater"),
+    n_neg_vs_ns   = sum(partner_enrichment == "Not significant"),
+    .groups = "drop"
+  ) %>%
+  arrange(enrichment, desc(n_neg_total))
+
+cat("\n── Freshwater species with negative interactions ──\n")
+neg_species_summary %>%
+  filter(enrichment == "Freshwater") %>%
+  print()
+
+cat("\n── Seawater species with negative interactions ──\n")
+neg_species_summary %>%
+  filter(enrichment == "Seawater") %>%
+  print()
+
+# ── Plot: negative interaction counts for FW and SW enriched species ──────────
+p_neg <- neg_species_summary %>%
+  filter(enrichment %in% c("Freshwater", "Seawater")) %>%
+  mutate(species = fct_reorder(species, n_neg_total)) %>%
+  pivot_longer(cols = c(n_neg_vs_FW, n_neg_vs_SW, n_neg_vs_ns),
+               names_to  = "partner_type",
+               values_to = "n") %>%
+  mutate(partner_type = case_when(
+    partner_type == "n_neg_vs_FW" ~ "vs Freshwater",
+    partner_type == "n_neg_vs_SW" ~ "vs Seawater",
+    TRUE                           ~ "vs Non-significant"
+  )) %>%
+  ggplot(aes(x = n, y = species, fill = partner_type)) +
+  geom_col(position = "stack", alpha = 0.85) +
+  geom_text(aes(label = ifelse(n > 0, n, "")),
+            position = position_stack(vjust = 0.5),
+            size = 2.5, colour = "white", fontface = "bold") +
+  # ── ADD: family label at the end of each bar ─────────────────────────────
+  geom_text(
+    data = neg_species_summary %>%               # use unsplit data for one label per species
+      filter(enrichment %in% c("Freshwater", "Seawater")) %>%
+      mutate(species = fct_reorder(species, n_neg_total)),
+    aes(x = n_neg_total + 0.1, y = species,      # position just past end of bar
+        label = family),
+    hjust       = 0,
+    size        = 2.5,
+    fontface    = "italic",
+    colour      = "grey30",
+    inherit.aes = FALSE
+  ) +
+  # ─────────────────────────────────────────────────────────────────────────
+  scale_fill_manual(
+    values = c("vs Freshwater"      = "#2166ac",
+               "vs Seawater"        = "#d6604d",
+               "vs Non-significant" = "grey70"),
+    name = "Negative interaction\npartner"
+  ) +
+  facet_wrap(~ enrichment, scales = "free_y") +
+  labs(
+    title = "Negative interactions of enriched species",
+    x     = "Number of negative edges",
+    y     = NULL
+  ) +
+  # ── expand right margin so family labels are not clipped ─────────────────
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.35))) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title  = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(face = "italic", size = 8),
+    strip.text  = element_text(face = "bold")
+  )
+
+p_neg
+
+# ggsave(paste0(folder_path, "negative_interactions_source_enriched_species_with_family_info.pdf"),
+#        p_neg, width = 7.5, height = 4)
+
+# ── Formatted table ───────────────────────────────────────────────────────────
+neg_species_summary %>%
+  filter(enrichment %in% c("Freshwater", "Seawater")) %>%
+  knitr::kable(
+    col.names = c("Species", "Enrichment", "Module", "Family",
+                  "Total neg.", "Neg. vs FW", "Neg. vs SW", "Neg. vs non-sig"),
+    caption   = "Negative interactions of enriched species from source communities"
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE, font_size = 11
+  ) %>%
+  kableExtra::column_spec(1, italic = TRUE) %>%
+  kableExtra::pack_rows(
+    index = table(
+      filter(neg_species_summary,
+             enrichment %in% c("Freshwater", "Seawater"))$enrichment
+    )
+  )
+  
+```
+
+***
+
+## Step 14 – Keystone species: betweenness centrality vs degree
+
+*What these metrics mean*
+
+| Metric | Definition | Ecological interpretation |
+|---|---|---|
+| **Degree** | Number of direct connections | How many species this species co-occurs / competes with |
+| **Betweenness centrality** | How often a species lies on the shortest path between other pairs | Acts as a bridge/connector between different parts of the network |
+| **Hub** | High degree | Abundant, widely co-occurring species |
+| **Connector/keystone** | High betweenness, moderate degree | Bridges different modules — loss disrupts network flow |
+| **Module hub** | High degree within its module | Dominant within one community cluster |
+
+```{r keystone-species, fig.width=12, fig.height=9, message=FALSE, warning=FALSE, out.width="100%"}
+
+# ── Compute all centrality metrics ────────────────────────────────────────────
+# Convert adjacency network to igraph format
+ig_network_full_filtered <- adj2igraph(getRefit(network_full_filtered), diag=TRUE,
+                                       vertex.attr=list(name=taxa_names(ps_microcosm_filtered)))
+ig_network_full_filtered 
+# ── compute each metric separately first — easier to debug ───────────────────
+deg_vec    <- as.numeric(igraph::degree(ig_network_full_filtered))
+hist(deg_vec)
+summary(deg_vec)
+
+bet_vec    <- as.numeric(igraph::betweenness(ig_network_full_filtered, normalized = TRUE))
+clo_vec    <- as.numeric(igraph::closeness(ig_network_full_filtered,   normalized = TRUE))
+eig_result <- igraph::eigen_centrality(ig_network_full_filtered)   # returns a list
+eig_vec    <- as.numeric(eig_result$vector)                        # extract just the vector
+
+# ── quick sanity check — all should be length 401 ────────────────────────────
+cat("degrees:     ", length(deg_vec), "\n")
+cat("betweenness: ", length(bet_vec), "\n")
+cat("closeness:   ", length(clo_vec), "\n")
+cat("eigenvector: ", length(eig_vec), "\n")
+
+# ── now build the data frame ──────────────────────────────────────────────────
+centrality_df <- data.frame(
+  species          = V(ig_network_full_filtered)$name,
+  degree           = deg_vec,
+  betweenness      = bet_vec,
+  closeness        = clo_vec,
+  eigen_centrality = eig_vec,
+  stringsAsFactors = FALSE
+) %>%
+  left_join(node_df %>% dplyr::select(species, enrichment, module, family, phylum,
+                                       clr_abund, node_size),
+            by = "species") %>%
+  mutate(
+    degree_z      = scale(degree)[, 1],
+    between_z     = scale(betweenness)[, 1],
+    keystone_type = case_when(
+      between_z >= 1.5 & degree_z >= 1.5  ~ "Network hub", # high both
+      between_z >= 1.5 & degree_z <  1.5  ~ "Connector/keystone", # bridge
+      between_z <  1.5 & degree_z >= 1.5  ~ "Module hub", # local dominant
+      TRUE                                  ~ "Peripheral"
+    )
+  ) %>%
+  arrange(desc(betweenness))
+
+head(centrality_df)
+
+
+
+# ── Summary table ─────────────────────────────────────────────────────────────
+cat("\n── Keystone species classification ──────────────────\n")
+print(table(centrality_df$keystone_type))
+cat("\n── Top 20 species by betweenness centrality ─────────\n")
+centrality_df %>%
+  slice_max(betweenness, n = 20) %>%
+  dplyr::select(species, enrichment, module, family,
+                degree, betweenness, eigen_centrality, keystone_type) %>%
+  print()
+
+# ── Plot 1: Betweenness vs degree scatter (main keystone plot) ────────────────
+# Label only the top species by betweenness + degree
+label_cutoff_b <- quantile(centrality_df$betweenness, 0.92)
+label_cutoff_d <- quantile(centrality_df$degree,      0.92)
+
+
+label_keys <- centrality_df %>%
+  filter(betweenness >= label_cutoff_b | degree >= label_cutoff_d) %>%
+  filter(keystone_type != "Peripheral")   # ← add this line
+
+label_keys <- centrality_df %>%
+  filter(betweenness >= label_cutoff_b | degree >= label_cutoff_d) %>%
+  filter(
+    keystone_type == "Network hub" |
+    (keystone_type %in% c("Module hub", "Connector/keystone") & 
+     enrichment %in% c("Freshwater", "Seawater"))
+  )
+
+keystone_colors <- c(
+  "Network hub"        = "#b2182b",   # red — most influential
+  "Connector/keystone" = "#e08214",   # orange — bridge species
+  "Module hub"         = "#4d9221",   # green — local dominants
+  "Peripheral"         = "grey75"     # grey — low influence
+)
+
+
+label_keys$seg_color <- enrich_colors[label_keys$enrichment]
+
+p_keystone <- ggplot(centrality_df,
+                     aes(x = degree, y = betweenness,
+                         colour = keystone_type, size = clr_abund)) +
+  geom_point(alpha = 0.75) +
+  geom_vline(xintercept = mean(centrality_df$degree) + 1.5 * sd(centrality_df$degree),
+             linetype = "dashed", colour = "grey50", linewidth = 0.4) +
+  geom_hline(yintercept = mean(centrality_df$betweenness) + 1.5 * sd(centrality_df$betweenness),
+             linetype = "dashed", colour = "grey50", linewidth = 0.4) +
+  annotate("text", x = Inf,
+           y     = mean(centrality_df$betweenness) + 1.55 * sd(centrality_df$betweenness),
+           label = "Betweenness threshold (z = 1.5)",
+           hjust = 1.05, size = 2.8, colour = "grey40") +
+  annotate("text",
+           x     = mean(centrality_df$degree) + 1.55 * sd(centrality_df$degree),
+           y     = Inf, label = "Degree threshold (z = 1.5)",
+           hjust = -0.05, vjust = 1.5, size = 2.8, colour = "grey40", angle = 90) +
+  
+  scale_colour_manual(values = keystone_colors, name = "Species type") +
+  
+  ggrepel::geom_label_repel(
+    data             = label_keys,
+    aes(x            = degree,
+        y            = betweenness,
+        label        = species,
+        fill         = enrichment),
+    colour           = "white",             
+    segment.color = label_keys$seg_color,
+    alpha            = 0.8,  
+    size             = 2.3, fontface = "italic",
+    label.size       = 0.05,
+    segment.size     = 0.1,
+    segment.alpha    = 0.8,
+    show.legend      = FALSE,
+    inherit.aes      = FALSE,
+    box.padding      = 0.35, 
+    max.overlaps     = 30
+  ) +
+  scale_fill_manual(values = enrich_colors, guide = "none") +
+  scale_size_continuous(
+    name  = "Mean CLR\nabundance",
+    range = c(1, 8),
+    guide = guide_legend(title.position = "top",
+                         override.aes   = list(colour = "grey50"))
+  ) +
+  labs(
+    # title = "Betweenness centrality vs degree — keystone species identification",
+    x     = "Degree (number of connections)",
+    y     = "Betweenness centrality (normalised)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title      = element_text(face = "bold", hjust = 0.5, size = 13),
+    plot.subtitle   = element_text(hjust = 0.5, colour = "grey40", size = 9),
+    legend.position = "right"
+  )
+
+ggsave(paste0(folder_path, "keystone_betweenness_vs_degree1.png"), p_keystone, width = 7, height = 5, dpi = 300, bg = "white")
+ggsave(paste0(folder_path, "keystone_betweenness_vs_degree.pdf"),  p_keystone, width = 7, height = 5)
+
+
+# ── Plot 2: Top 20 hubs ranked bar chart ──────────────────────────────────────
+p_top20 <- centrality_df %>%
+  slice_max(betweenness, n = 20) %>%
+  mutate(species = fct_reorder(species, betweenness)) %>%
+  ggplot(aes(x = betweenness, y = species, fill = keystone_type)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = paste0("deg=", degree)),
+            hjust = -0.1, size = 2.5, colour = "grey30") +
+  scale_fill_manual(values = keystone_colors, name = "Species type") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "Top 20 species by betweenness centrality",
+    x     = "Betweenness centrality (normalised)",
+    y     = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title  = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(face = "italic", size = 9)
+  )
+
+# ── Plot 3: Eigenvector centrality vs betweenness ─────────────────────────────
+p_eigen <- ggplot(centrality_df,
+                  aes(x = eigen_centrality, y = betweenness,
+                      colour = keystone_type, size = clr_abund)) +
+  geom_point(alpha = 0.75) +
+  ggrepel::geom_label_repel(
+    data         = label_keys,
+    aes(label    = species),
+    size         = 2.2, fontface = "italic",
+    fill         = alpha("white", 0.75), label.size = 0.05,
+    box.padding  = 0.35, max.overlaps = 25,
+    segment.size = 0.2, show.legend = FALSE
+  ) +
+  scale_colour_manual(values = keystone_colors, name = "Species type") +
+  scale_size_continuous(
+    name  = "Mean CLR\nabundance",
+    range = c(1, 8),
+    guide = guide_legend(title.position = "top",
+                         override.aes = list(colour = "grey50"))
+  ) +
+  labs(
+    title = "Eigenvector centrality vs betweenness",
+    subtitle = "Eigenvector centrality: how connected are a species' neighbours",
+    x = "Eigenvector centrality",
+    y = "Betweenness centrality (normalised)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, colour = "grey40", size = 9)
+  )
+
+# ── Combine ───────────────────────────────────────────────────────────────────
+(p_keystone | p_top20) / p_eigen +
+  plot_annotation(
+    title   = "Keystone species analysis",
+    caption = "Betweenness and eigenvector centrality normalised to [0,1]",
+    theme   = theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 15))
+  )
+
+# ggsave(paste0(folder_path, "keystone_combined.pdf"),  width = 14, height = 12)
+# ggsave(paste0(folder_path, "keystone_combined.png"),  width = 14, height = 12,
+#        dpi = 300, bg = "white")
+
+# ── Formatted summary table ───────────────────────────────────────────────────
+
+centrality_df %>%
+  filter(keystone_type != "Peripheral") %>%
+  dplyr::select(species, phylum, family, module, enrichment,
+                degree, betweenness, eigen_centrality, keystone_type) %>%
+  arrange(keystone_type, desc(betweenness)) %>%
+  mutate(across(c(betweenness, eigen_centrality), ~ round(.x, 4))) %>%
+  knitr::kable(
+    col.names = c("Species", "Phylum", "Family", "Module", "Enrichment",
+                  "Degree", "Betweenness", "Eigenvector", "Type"),
+    caption   = "Keystone and hub species (peripheral species excluded)"
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE, font_size = 11
+  ) %>%
+  kableExtra::column_spec(1, italic = TRUE) %>%
+  kableExtra::pack_rows(
+    index = table(
+      filter(centrality_df, keystone_type != "Peripheral") %>%
+        arrange(keystone_type) %>%
+        pull(keystone_type)
+    )
+  )
+```
+
+***
+
+# 3. Other ideas for better plotting
+
+### Idea 1 – Highlight enriched nodes with a glowing halo
+Add a second `geom_point()` layer behind the main nodes using a larger size
+and low alpha — creates a "glow" effect that makes enriched species pop
+without relying solely on label text.
+
+```{r bonus-halo}
+halo_df <- node_df %>% filter(enrichment != "Not significant")
+
+plot_A_halo <- plot_A +
+  geom_point(
+    data  = halo_df,
+    aes(x = x, y = y),
+    size  = node_df %>% filter(enrichment != "Not significant") %>% pull(node_size) * 2.5,
+    colour = "gold", alpha = 0.25,
+    inherit.aes = FALSE
+  )
+plot_A_halo
+```
+
+***
+
+### Idea 2 – Zoom inset of a dense module
+Use `ggforce::facet_zoom()` or manually crop coords to show a busy
+module at higher resolution alongside the full network.
+
+```{r bonus-zoom}
+# install.packages("ggforce")
+library(ggforce)
+
+# Get bounding box of module 1
+m1_nodes <- node_df %>% filter(module == "1")
+xlim_m1  <- range(m1_nodes$x) + c(-1, 1)
+ylim_m1  <- range(m1_nodes$y) + c(-1, 1)
+
+p <- plot_A + ggforce::facet_zoom(xlim = xlim_m1, ylim = ylim_m1, zoom.size = 0.6)
+p
+```
+
+
+### Idea 3 – Interactive plot with visNetwork
+Makes it easy to hover over nodes and see species names, module, and
+enrichment — very useful for presentations.
+
+```{r bonus-visnetwork}
+# install.packages("visNetwork")
+library(visNetwork)
+
+vis_nodes <- node_df %>%
+  transmute(
+    id    = species,
+    label = species,
+    group = enrichment,
+    value = node_size,
+    title = paste0("<b>", species, "</b><br>",
+                   "Enrichment: ", enrichment, "<br>",
+                   "Module: ", module, "<br>",
+                   "family: ", family)
+  )
+
+vis_edges <- edge_df %>%
+  transmute(from = from, to = to,
+            color = edge_color, width = 0.5)
+
+visNetwork(vis_nodes, vis_edges, width = "100%", height = "700px") %>%
+  visOptions(highlightNearest = list(enabled = TRUE, degree = 1),
+             selectedBy = "group") %>%
+  visGroups(groupname = "Freshwater",      color = "#2166ac") %>%
+  visGroups(groupname = "Seawater",        color = "#d6604d") %>%
+  visGroups(groupname = "Not significant", color = "grey75") %>%
+  visLayout(randomSeed = 42)
+```
+
+
+## Session Info
+```{r}
+sessionInfo()
+```
+

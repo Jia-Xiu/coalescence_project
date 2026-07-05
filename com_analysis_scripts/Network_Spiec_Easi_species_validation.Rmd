@@ -1,0 +1,543 @@
+---
+title: "Network Construction & Validation"
+author: "Xiu Jia"
+email: "xibeihenai@gmail.com"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+
+I used the script from the "Network Analysis Workshop" of National Centre for Soil Ecology Day on October 30, 2024, which is hosted by: Natalie Oram (UvA: n.j.oram@uva.nl) and Doina Bucur (UTwente: d.bucur@utwente.nl). It is suggested by Tianci on 25 Nov 2024 and implemented on 2 December 2024.
+
+**This script to creating co-occurrence networks:**
+* The networks are built with with Spiec.Easi: https://github.com/zdk123/SpiecEasi, visualized with igraph: https://r.igraph.org/ and topology determined with various packages (igraph, braingraph).
+* We will use the feature table with raw number of reads in the table. These data have been aggregated to the Species level. 
+
+
+https://microbiome.github.io/OMA/docs/devel/pages/network_learning.html 
+chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://epub.ub.uni-muenchen.de/74854/1/bbaa290.pdf
+
+**Further reading:**
+- Kurtz et al., 2015. https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1004226
+- Chen et al., 2024. https://arxiv.org/pdf/2407.03897
+- Chen and Bucur, 2024. https://link.springer.com/chapter/10.1007/978-3-031-57515-0_13
+- Caruso et al., 2022. https://besjournals.onlinelibrary.wiley.com/doi/full/10.1111/2041-210X.13985
+- Gueseva et al., 2022. https://www.sciencedirect.com/science/article/pii/S003807172200061X
+- Shan et al., 2023. https://www.nature.com/articles/s41559-023-02021-z
+- Naghshineh et al., 2025 Reorganization of bacterial community network structure in the eastern redback salamander (Plethodon cinereus) and its soil reservoir across a gradient of land use, FEMS Microbiology Ecology. https://doi.org/10.1093/femsec/fiaf057
+
+# 0. Installing SpiecEasi on macOS (Apple Silicon)
+
+**Prerequisites — run once in Terminal before opening R:**
+
+**1. Install Xcode Command Line Tools**
+
+Download **Command Line Tools for Xcode 16 beta 5** from [https://developer.apple.com/download/all/](https://developer.apple.com/download/all/) (free Apple ID required), install the `.dmg`, then run:
+
+```{bash eval=FALSE}
+sudo xcode-select --switch /Library/Developer/CommandLineTools
+# Verify it worked after installation completes 
+bashxcode-select -p
+# Expected: /Library/Developer/CommandLineTools 
+clang --version
+# Expected: Apple clang version 15.x.x ..
+```
+
+**2. Install gfortran**
+
+Download **gfortran-14.2-ARM-Sequoia.dmg** from [https://github.com/fxcoudert/gfortran-for-macOS/releases](https://github.com/fxcoudert/gfortran-for-macOS/releases) and install it.
+
+Then add gfortran to your PATH:
+```{bash eval=FALSE}
+echo 'export PATH="/usr/local/gfortran/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+# I got error in the begining as R can't find gfortran because it's not in the expected path. 
+# Verify gfortran is accessible 
+# Run this in your terminal and Verify it works now: 
+bashwhich gfortran
+gfortran --version
+```
+
+**3. Configure R to find gfortran**
+```{bash eval=FALSE}
+mkdir -p ~/.R
+cat > ~/.R/Makevars << 'EOF'
+FC = /usr/local/gfortran/bin/gfortran
+F77 = /usr/local/gfortran/bin/gfortran
+FLIBS = -L/usr/local/gfortran/lib/gcc/14 -L/usr/local/gfortran/lib -lgfortran -lquadmath -lm
+EOF
+```
+
+**4. Install SpiecEasi — run in R:**
+```{r Install-SpiecEasi, eval=FALSE}
+# confirm everything is ready
+pkgbuild::check_build_tools(debug = TRUE)
+# Should return TRUE
+
+remotes::install_github("zdk123/SpiecEasi")
+
+# Verify
+library(SpiecEasi)
+```
+
+---
+
+# 1. Load libraries and work directory
+```{r  Load-libraries-set-up, message = FALSE, warning = FALSE}
+
+# clean the work enviornment
+rm(list=ls())
+
+library(tidyverse) 
+library(phyloseq)
+library(microbiome)
+
+library(SpiecEasi) # building network
+library(igraph)
+
+# library(ggplot2)
+# library(dplyr)
+# library(tidyr)
+# library(purrr)
+library(patchwork)
+library(qgraph)        # smallworldness()
+library(DescTools)     # AUC()
+library(brainGraph)    # robustness()
+
+library(intergraph)
+library(GGally)
+library(network)
+library(ggrepel)
+library(ggnewscale)   # two colour scales in one ggplot
+library(Matrix)
+library(patchwork)    # combine panels side-by-side
+library(RColorBrewer)
+library(stringr)
+library(ggupset)
+library(forcats)
+library(circlize)
+
+
+# change the base path where to save the outputs accordingly.
+folder_path <- "network_Spiec_Easi_species/"
+ALDEx2_path <- "ALDEx2_differential_analysis_source_coms_species/"
+
+```
+
+---
+
+# 2. Network construction 
+
+## Step 1 – Load feature table (raw reads) and filter data 
+Not done for this dataset as it is already aggregated to the species level, leaving 453 taxa (total read count at species level) (which is fine for the network to handle). This is one option of reducing the amount of nodes in the dataset. \n
+
+How you filter data is an important question to consider. One option is to remove low-abundance taxa or taxa that only occur in a small proportion of your experimental units. E.g. if taxa are only present in 5% of your 4 bacterial communities from seawater condition, it is likely that they don't play an important role in your co-occurrence network (as their chance to 'co-occur' is quite small). How many nodes a network can handle will depend on the dataset (the variation in data). There's no hard and fast number for this, but around 200-800 nodes generally works fine. 
+```{r}
+## Load data
+## The data format we need is a phyloseq object. Here, we combine the OTU table, (simplified) taxonomy table, and the sample metadata (all .csv files) into a phyloseq object. If you have the phloseq object, just start from there. 
+
+# read phyloseq object
+ps_rawreads <- readRDS("phyloseq_object_species_rawreads.rds")
+
+# only keep the samples from microcosm experiment
+ps_microcosm <- subset_samples(ps_rawreads, category == "microcosm")
+
+# remove taxa do not appear in any samples
+ps_microcosm <- filter_taxa(ps_microcosm, function(x) sum(x) != 0, TRUE)
+ps_microcosm
+# saveRDS(ps_microcosm, file = "phyloseq_object_species_rawreads_microcosm.rds")
+
+# Remove taxa not seen more than 5 times in at least 2% of the samples. This protects against an taxa with small mean & trivially large C.V.
+
+# Filter taxa: more than 5 reads in at least 2% of samples
+min_samples <- ceiling(0.02 * nsamples(ps_microcosm))
+min_samples
+
+# Remove taxa not seen more than 4 times of the samples. This protects against an taxa with small mean & trivially large C.V.
+ps_microcosm_filtered <- filter_taxa(ps_microcosm, function(x) sum(x != 0) >= 4, prune = TRUE) # or replace the number by min_samples
+ps_microcosm_filtered
+
+```
+
+---
+
+## Step 2 – Construt network for the full dataset 
+Below is the code to construct the network. This step is heavy on computational memory and very slow. So I have constructed networks in advance and loaded it later on. See https://github.com/zdk123/SpiecEasi for more details. This input for SPIEC-EASI is a counts table.  The normalization and tranformation is done by the function. \n More information on [SPIEC-EASI](http://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1004226).  
+
+
+- Ingredients
+- method: can be 'mb' (Neighborhood selection) or 'glasso' (inverse covariance selection)
+- nlambda: tells the model how many different lambda values to try (how many ways to wire each node pair in the network). This essentially determines how complex your network is. A value between 20-120 is fine. Higher nlambda = more computational time and very high nlambda (> 150 or so) risks over fitting.
+- lambda.min.ratio: determines/constrains the range of nlambda values (i.e. 1e-2 means that the smallest lambda value is 1% of the largest)
+- pulsar.params: rep.num = number of times the network is re-sampled (bootstrapped), thresh: sets the stability threshold for edges in the network. 0.05 means that an edge must occur in 5% of the bootstrapped samples to be considered in the final model.
+- sel.criterion: model sparseness is inferred using the Stability Approach to Regularization Selection (StARS), which involves random sub-sampling of the data set to find a network with low variability in the selected set of edges. character string specifying criterion/method for model selection. Accepts 'stars' [default], 'bstars' (Bounded StARS)
+
+- The goal is to have a stable network >> target stability threshold (getStability) should be very close to 0.05. To improve the stability score, you can adjust:
+- nlambda
+- lambda.min.ratio
+- sel.criterion
+
+```{r eval = FALSE}
+## Parallel multicore ##
+pargs <- list(rep.num=20, seed=210, ncores=4, thresh=0.05) # this is much faster by using more cores, but not work at this moment
+pargs <- list(rep.num=20, seed=210, ncores=1, thresh=0.05)
+
+## Construct the network
+network_full_filtered <- spiec.easi(ps_microcosm_filtered, method='mb', nlambda=120, lambda.min.ratio=1e-2,
+                                     pulsar.params=pargs, sel.criterion='bstars')
+
+
+getStability(network_full_filtered) # Should be close to 0.05, now 0.04794127
+
+## Save network
+# saveRDS(network_full_filtered, paste0(folder_path, "network_full_filtered.rds"))
+```
+
+***
+
+# 3. Network validation (quality & robustness)
+
+SpiecEasi networks require three levels of validation before ecological interpretation:
+
+| Level | What it tests | Key metric |
+|---|---|---|
+| 1. Internal stability | Did the StARS/bSTARS selection converge? | `getStability()` ≈ 0.05 |
+| 2. Non-randomness | Is the observed network different from random? | Compare topology to null ensemble |
+| 3. Small-world topology | Is the network biologically plausible? | σ = (C/C_rand) / (L/L_rand) > 1 |
+
+***
+
+## Step 1 – Re-load the network & topology metrics 
+
+```{r network-validation, fig.width=12, fig.height=9, message=FALSE, warning=FALSE}
+
+# ── Load SpiecEasi network ────────────────────────────────────────────────────
+network_full_filtered <- readRDS(paste0(folder_path, "network_full_filtered.rds"))
+
+# ── 1. StARS stability score ──────────────────────────────────────────────────
+stability <- getStability(network_full_filtered)
+cat(glue::glue("
+── 1. StARS stability ────────────────────────────────
+  Stability score : {round(stability, 5)}
+  Target          : ≤ 0.05
+  Status          : {ifelse(stability <= 0.05, '✓ PASS — network is stable', '✗ FAIL — consider adjusting nlambda')}
+──────────────────────────────────────────────────────
+\n"))
+
+
+# Convert adjacency network to igraph format
+ig_network_full_filtered <- adj2igraph(getRefit(network_full_filtered), diag=TRUE,
+                                       vertex.attr=list(name=taxa_names(ps_microcosm_filtered)))
+ig_network_full_filtered 
+
+## Extract edge list and attributes 
+edgelist_network_full_filtered <- as_edgelist(ig_network_full_filtered, names = FALSE)
+edgelist_network_full_filtered <- as.data.frame(edgelist_network_full_filtered)
+edgelist_network_full_filtered[1:5,]
+
+## Extract adjacency matrix
+adj_network_full_filtered <- as_adjacency_matrix(ig_network_full_filtered, sparse=FALSE)
+adj_network_full_filtered <- as.data.frame(adj_network_full_filtered)
+adj_network_full_filtered[1:3, 1:2]
+# write.csv(adj_network_full_filtered, paste0(folder_path, "full_network_adj_matrix.csv"))
+
+
+# ── 2. Basic network properties ───────────────────────────────────────────────
+n_nodes    <- vcount(ig_network_full_filtered)
+n_edges    <- ecount(ig_network_full_filtered)
+density    <- edge_density(ig_network_full_filtered)
+components <- components(ig_network_full_filtered)
+# summary(weight)
+# hist(weight, breaks = 50,
+#      main = "Distribution of partial correlation coefficients (β)",
+#      xlab = "β coefficient")
+
+betaMat  <- as.matrix(symBeta(getOptBeta(network_full_filtered)))
+n_pos    <- length(betaMat[betaMat > 0]) / 2
+n_neg    <- length(betaMat[betaMat < 0]) / 2
+
+cat(glue::glue("
+── 2. Basic network properties ──────────────────────
+  Nodes                  : {n_nodes}
+  Edges                  : {n_edges}
+  Density                : {round(density, 4)}
+  Connected components   : {components$no}
+  Positive edges         : {n_pos}  ({round(100*n_pos/n_edges, 1)}%)
+  Negative edges         : {n_neg}  ({round(100*n_neg/n_edges, 1)}%)
+──────────────────────────────────────────────────────
+\n"))
+
+# ── 3. Observed topology metrics ─────────────────────────────────────────────
+obs_transitivity  <- transitivity(ig_network_full_filtered, type = "average")
+obs_mean_path     <- mean_distance(ig_network_full_filtered, directed = FALSE)
+obs_modularity    <- modularity(cluster_louvain(ig_network_full_filtered))
+obs_mean_between  <- mean(betweenness(ig_network_full_filtered))
+obs_mean_degree   <- mean(degree(ig_network_full_filtered))
+
+cat(glue::glue("
+── 3. Observed topology ─────────────────────────────
+  Clustering coefficient : {round(obs_transitivity, 4)}
+  Mean path length       : {round(obs_mean_path, 4)}
+  Modularity (Louvain)   : {round(obs_modularity, 4)}
+  Mean betweenness       : {round(obs_mean_between, 2)}
+  Mean degree            : {round(obs_mean_degree, 2)}
+──────────────────────────────────────────────────────
+\n"))
+
+# ── 4. Small-world index (σ) ──────────────────────────────────────────────────
+# σ > 1 means the network is more clustered than random but not much longer path
+# Uses 100 Erdos-Renyi random graphs with same N and edge density
+
+set.seed(42)
+n_rand <- 100
+rand_trans  <- numeric(n_rand)
+rand_path   <- numeric(n_rand)
+
+for (i in seq_len(n_rand)) {
+  g_rand         <- erdos.renyi.game(n_nodes, n_edges, type = "gnm")
+  rand_trans[i]  <- transitivity(g_rand, type = "average")
+  rand_path[i]   <- mean_distance(g_rand, directed = FALSE)
+}
+
+C_rand <- mean(rand_trans, na.rm = TRUE)
+L_rand <- mean(rand_path,  na.rm = TRUE)
+
+gamma <- obs_transitivity / C_rand     # clustering ratio
+lambda <- obs_mean_path   / L_rand     # path length ratio
+sigma  <- gamma / lambda               # small-world index
+
+cat(glue::glue("
+── 4. Small-world index ─────────────────────────────
+  C_obs / C_rand  (γ)    : {round(gamma, 3)}   (> 1 = more clustered than random)
+  L_obs / L_rand  (λ)    : {round(lambda, 3)}   (≈ 1 = similar path length to random)
+  Small-world σ = γ/λ    : {round(sigma, 3)}
+  Interpretation         : {ifelse(sigma > 1, '✓ Small-world network confirmed (σ > 1)', '✗ Not small-world (σ ≤ 1)')}
+──────────────────────────────────────────────────────
+\n"))
+
+```
+
+***
+
+## Step 2 – Permutation to generate null ensemble
+
+Permutation has been run before, so we just need to load it in the next step.
+```{r generate-null-ensemble, eval=FALSE, message=FALSE, warning=FALSE}
+# ── Generate null model ensemble in R ────────────────────────────────────────
+# Method: degree-preserving edge rewiring (Maslov-Sneppen algorithm)
+# This preserves the degree sequence of each node while randomising
+# which nodes are connected — the standard null model for ecological networks
+# igraph contains a function to rewire networks. We will rewire 100x edges while preserving the original degree distribution. 10x permutations should give an idea of the variation in centralities. For each of the permutations, we can generate a similar dataframe as the centralities dataframe generated for the original graph.
+
+
+n_nulls  <- 999    # number of null models — 999 is standard in the literature
+niter    <- 100    # rewiring iterations per edge (higher = more randomised)
+                   # recommended: 100× number of edges
+
+set.seed(42)
+
+cat(glue::glue("
+── Generating {n_nulls} null models ─────────────────────
+  Method : degree-preserving edge rewiring
+  Network: {vcount(ig_network_full_filtered)} nodes, {ecount(ig_network_full_filtered)} edges
+  niter  : {niter} rewiring attempts per edge
+  This will take several minutes...
+──────────────────────────────────────────────────────
+\n"))
+
+# ── Helper: generate one null graph ──────────────────────────────────────────
+make_null_graph <- function(g, niter) {
+  # rewire() shuffles edges while preserving degree sequence
+  g_null <- rewire(g, with = keeping_degseq(niter = niter * ecount(g))) # 204,000 attempts per edge — 10× edges is commonly used in ecology papers
+  # simplify removes any self-loops or multi-edges introduced by rewiring
+  g_null <- igraph::simplify(g_null)    
+  g_null
+}
+
+# ── Generate the ensemble with progress reporting ─────────────────────────────
+# Use a simple loop so progress is visible
+null_graph_list <- vector("list", n_nulls)
+
+for (i in seq_len(n_nulls)) {
+  null_graph_list[[i]] <- make_null_graph(ig_network_full_filtered, niter)
+  if (i %% 100 == 0) cat("  Generated", i, "/", n_nulls, "null models\n")
+}
+
+cat("Done! Saving null ensemble...\n")
+
+# ── Save for later use ────────────────────────────────────────────────────────
+saveRDS(null_graph_list,  paste0(folder_path, "null_graph_list.rds"))
+
+cat("Saved to:", paste0(folder_path, "null_graph_list.rds"), "\n")
+
+# ```
+
+# Re-load the permutations for statistical test:
+# ```{r null-ensemble-metrics, eval = FALSE, message=FALSE, warning=FALSE}
+
+# ── 5. Compare observed vs null ensemble topology ─────────────────────────────
+# Load null ensemble from previous steps
+null_graph_list <- readRDS(paste0(folder_path, "null_graph_list.rds"))
+
+cat("Loaded", length(null_graph_list), "null models\n")
+cat("First null graph:", vcount(null_graph_list[[1]]),
+    "nodes,", ecount(null_graph_list[[1]]), "edges\n")
+
+# ── Verify degree sequence is preserved ──────────────────────────────────────
+# The mean degree of null models should match the observed network
+obs_deg   <- mean(degree(ig_network_full_filtered))
+null_deg  <- mean(sapply(null_graph_list[1:10],
+                          function(g) mean(degree(g))))
+cat(glue::glue("
+── Degree preservation check ────────────────────────
+  Observed mean degree    : {round(obs_deg, 3)}
+  Null mean degree (n=10) : {round(null_deg, 3)}
+  Match                   : {ifelse(abs(obs_deg - null_deg) < 0.01, '✓ OK', '✗ Check rewiring')}
+──────────────────────────────────────────────────────
+\n"))
+
+# ── Compute topology metrics for each null graph ──────────────────────────────
+compute_null_metrics <- function(g) {
+  list(
+    transitivity  = transitivity(g, type = "average"),
+    mean_path     = tryCatch(
+                      mean_distance(g, directed = FALSE),
+                      error = function(e) NA_real_),
+    modularity    = modularity(cluster_louvain(g)),
+    mean_between  = mean(betweenness(g, normalized = TRUE))
+  )
+}
+
+
+cat("Computing topology for", length(null_graph_list), "null models...\n")
+null_metrics   <- purrr::map(null_graph_list, compute_null_metrics)
+null_df        <- bind_rows(null_metrics) %>% mutate(type = "Null")
+
+# ── Compute AUC robustness for null ensemble ──────────────────────────────────
+# Uses degree-targeted attack robustness from brainGraph
+# library(brainGraph)
+
+robust_null <- purrr::map(null_graph_list, function(g) {
+  tryCatch(
+    robustness(g, type = "vertex", measure = "degree"),
+    error = function(e) NULL
+  )
+})
+
+# remove any failed runs
+robust_null  <- compact(robust_null)
+
+auc_null <- map_dbl(robust_null, function(r) {
+  AUC(r$removed.pct, r$comp.pct)
+})
+
+null_df$AUC <- c(auc_null, rep(NA, nrow(null_df) - length(auc_null)))
+
+# ── Save null metrics for use in validation plots ─────────────────────────────
+write.csv(null_df, paste0(folder_path, "null_ensemble_topology.csv"),
+          row.names = FALSE)
+
+cat("Null ensemble metrics saved.\n")
+
+```
+
+***
+
+## Step 3 – Plot the results
+```{r null-ensemble-metrics-reload, message=FALSE, warning=FALSE}
+null_df <- read.csv(paste0(folder_path, "null_ensemble_topology.csv"))
+summary(null_df)
+
+
+obs_df <- data.frame(
+  transitivity = obs_transitivity,
+  mean_path    = obs_mean_path,
+  modularity   = obs_modularity,
+  mean_between = obs_mean_between,
+  type         = "Observed"
+)
+
+combined_df <- bind_rows(null_df, obs_df)
+
+# ── 6. Z-scores: how many SDs is the observed from the null mean? ─────────────
+z_scores <- null_df %>%
+  summarise(across(where(is.numeric), list(mean = mean, sd = sd), na.rm = TRUE)) %>%
+  pivot_longer(everything(),
+               names_to  = c("metric", ".value"),
+               names_sep = "_(?=[^_]+$)") %>%
+  left_join(
+    obs_df %>% pivot_longer(-type, names_to = "metric", values_to = "obs"),
+    by = "metric"
+  ) %>%
+  mutate(
+    z        = (obs - mean) / sd,
+    p_approx = 2 * pnorm(-abs(z)),   # two-tailed approximate p-value
+    sig      = case_when(
+      p_approx < 0.001 ~ "***",
+      p_approx < 0.01  ~ "**",
+      p_approx < 0.05  ~ "*",
+      TRUE              ~ "ns"
+    )
+  )
+
+cat("\n── 5. Z-scores vs null ensemble ─────────────────────\n")
+print(z_scores %>% dplyr::select(metric, obs, mean, sd, z, p_approx, sig),
+      digits = 3)
+cat("──────────────────────────────────────────────────────\n")
+
+# ── 7. Violin plots: observed vs null ─────────────────────────────────────────
+plot_metric <- function(metric_name, y_label) {
+  ggplot() +
+    geom_violin(
+      data  = null_df,
+      aes(x = "Null", y = .data[[metric_name]]),
+      fill  = "steelblue", alpha = 0.35, colour = "grey50"
+    ) +
+    geom_point(
+      data   = obs_df,
+      aes(x  = "Observed", y = .data[[metric_name]]),
+      colour = "darkred", size = 4, shape = 18
+    ) +
+    annotate("text",
+             x     = 1.5,
+             y     = max(null_df[[metric_name]], na.rm = TRUE),
+             label = paste0("z = ",
+                            round(z_scores$z[z_scores$metric == metric_name], 2),
+                            " ", z_scores$sig[z_scores$metric == metric_name]),
+             size  = 3.5, colour = "darkred") +
+    labs(title = NULL, x = NULL, y = y_label) +
+    theme_minimal(base_size = 11) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 11))
+}
+
+pv1 <- plot_metric("transitivity",  "Clustering coefficient")
+pv2 <- plot_metric("mean_path",     "Mean path length")
+pv3 <- plot_metric("modularity",    "Modularity (Q)")
+pv4 <- plot_metric("mean_between",  "Mean betweenness")
+
+(pv1 | pv2) / (pv3 | pv4) +
+  plot_annotation(
+    title    = "Observed network vs null ensemble (n = 999)",
+    subtitle = paste0(
+      "Red diamond = observed  |  Blue violin = null distribution\n",
+      "z-score and significance vs null mean shown on each panel"
+    ),
+    theme = theme(
+      plot.title    = element_text(face = "bold", hjust = 0.5, size = 14),
+      plot.subtitle = element_text(hjust = 0.5, colour = "grey40", size = 10)
+    )
+  )
+
+ggsave(paste0(folder_path, "network_validation_vs_null.pdf"),  width = 6, height = 5)
+ggsave(paste0(folder_path, "network_validation_vs_null.png"),  width = 6, height = 5,
+       dpi = 300, bg = "white")
+
+```
+
+# Session Info
+```{r}
+sessionInfo()
+```
+
